@@ -3,17 +3,13 @@ import 'dart:isolate';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
-/// The transpiled model bundle is shipped inside the APK as an asset and
-/// unpacked to internal storage on first launch. (Cactus models must be
-/// transpiled on a host before they are loadable; the device cannot do it,
-/// so we ship a ready-to-load bundle.)
-const String kModelAsset = 'assets/model.zip';
-const String kModelName = 'lfm2.5-350m-int4';
+import 'model_catalog.dart';
 
-/// Files `cactus_init` requires in the model directory. The transpiled graph
-/// lives under components/manifest.json; raw weights + tokenizer sit at root.
+/// Files `cactus_init` requires in a model directory. The transpiled graph lives
+/// under components/manifest.json; raw weights + tokenizer sit at root.
 const List<String> _requiredFiles = [
   'config.txt',
   'token_embeddings.weights',
@@ -22,13 +18,14 @@ const List<String> _requiredFiles = [
   'components/manifest.json',
 ];
 
-/// Reports unpack progress. [progress] is null during the indeterminate phases.
+/// Reports install progress. [progress] is 0..1 during download, null during
+/// the indeterminate unpack/copy phases.
 typedef ProgressCallback = void Function(String phase, double? progress);
 
 class ModelManager {
-  Future<Directory> _modelDir() async {
+  Future<Directory> _modelDir(String id) async {
     final docs = await getApplicationDocumentsDirectory();
-    return Directory('${docs.path}/models/$kModelName');
+    return Directory('${docs.path}/models/$id');
   }
 
   Future<bool> _isValid(Directory dir) async {
@@ -39,39 +36,73 @@ class ModelManager {
     return true;
   }
 
-  /// Returns the model directory path if a valid model is already unpacked.
-  Future<String?> existingModelPath() async {
-    final dir = await _modelDir();
+  /// Whether a usable copy of [spec] is already on disk.
+  Future<bool> isInstalled(ModelSpec spec) async =>
+      _isValid(await _modelDir(spec.id));
+
+  /// Returns the model directory if installed, else null.
+  Future<String?> installedPath(ModelSpec spec) async {
+    final dir = await _modelDir(spec.id);
     return await _isValid(dir) ? dir.path : null;
   }
 
-  /// Ensures the bundled model is unpacked, returning its directory.
-  /// No-ops if already present.
-  Future<String> ensureModel(ProgressCallback onProgress) async {
-    final modelDir = await _modelDir();
+  /// Ensures [spec] is installed (unpacking the bundled asset or downloading the
+  /// bundle), returning its directory. No-ops if already present.
+  Future<String> ensureInstalled(ModelSpec spec, ProgressCallback onProgress) async {
+    final modelDir = await _modelDir(spec.id);
     if (await _isValid(modelDir)) return modelDir.path;
 
-    onProgress('Preparing model…', null);
-    // Copy the asset zip out of the APK to a temp file.
     final tmp = await getTemporaryDirectory();
-    final zipPath = '${tmp.path}/$kModelName.zip';
-    final data = await rootBundle.load(kModelAsset);
-    await File(zipPath).writeAsBytes(
-      data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
-      flush: true,
-    );
+    final zipPath = '${tmp.path}/${spec.id}.zip';
 
-    onProgress('Unpacking model…', null);
+    if (spec.isBundled) {
+      onProgress('Preparing model…', null);
+      final data = await rootBundle.load(spec.asset!);
+      await File(zipPath).writeAsBytes(
+        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+        flush: true,
+      );
+    } else {
+      await _download(spec.url!, zipPath, onProgress);
+    }
+
+    onProgress('Unpacking…', null);
     await Isolate.run(() => _extractZip(zipPath, modelDir.path));
     _promoteSingleRoot(modelDir);
 
     if (!await _isValid(modelDir)) {
+      // Leave no half-extracted directory behind.
+      try {
+        await modelDir.delete(recursive: true);
+      } catch (_) {}
       throw Exception('Model bundle is missing required files after unpacking.');
     }
     try {
       await File(zipPath).delete();
     } catch (_) {}
     return modelDir.path;
+  }
+
+  Future<void> _download(String url, String zipPath, ProgressCallback onProgress) async {
+    onProgress('Downloading…', 0);
+    final client = http.Client();
+    try {
+      final resp = await client.send(http.Request('GET', Uri.parse(url)));
+      if (resp.statusCode != 200) {
+        throw Exception('Download failed: HTTP ${resp.statusCode}');
+      }
+      final total = resp.contentLength ?? 0;
+      var received = 0;
+      final sink = File(zipPath).openWrite();
+      await for (final chunk in resp.stream) {
+        sink.add(chunk);
+        received += chunk.length;
+        if (total > 0) onProgress('Downloading…', received / total);
+      }
+      await sink.close();
+    } finally {
+      client.close();
+    }
   }
 }
 

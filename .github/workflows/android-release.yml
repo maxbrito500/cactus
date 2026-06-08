@@ -112,7 +112,7 @@ jobs:
     # arm64 runner. The bundle is cached as a release asset; subsequent runs
     # skip the heavy transpile entirely.
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -127,21 +127,28 @@ jobs:
           else tag=$(tr -d '[:space:]' < CACTUS_VERSION); fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Check whether the bundle already exists on the release
-        id: check
+      # Catalog of models to host as release bundles: "<bundle-id>:<hf-model-id>".
+      # The app embeds the first (default) and downloads the rest on demand.
+      - name: Determine missing bundles
+        id: missing
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          if gh release view "$TAG" 2>/dev/null | grep -q 'lfm2.5-350m-int4-bundle.zip'; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Bundle already present on $TAG — skipping transpile."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          MODELS="lfm2.5-350m-int4:LiquidAI/LFM2.5-350M qwen3-1.7b-int4:Qwen/Qwen3-1.7B"
+          assets=$(gh release view "$TAG" 2>/dev/null || true)
+          missing=""
+          for m in $MODELS; do
+            id="${m%%:*}"
+            echo "$assets" | grep -q "${id}-bundle.zip" || missing="$missing $m"
+          done
+          missing="$(echo $missing | xargs)"
+          echo "list=$missing" >> "$GITHUB_OUTPUT"
+          [ -n "$missing" ] && echo "any=true" >> "$GITHUB_OUTPUT" || echo "any=false" >> "$GITHUB_OUTPUT"
+          echo "Missing bundles: ${missing:-(none)}"
 
       - name: Install Python toolchain
-        if: steps.check.outputs.exists == 'false'
+        if: steps.missing.outputs.any == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y python3.12-venv cmake build-essential zip libcurl4-openssl-dev
@@ -151,31 +158,32 @@ jobs:
           venv/bin/pip install -r python/requirements.txt -q
           venv/bin/pip install -e python -q
 
-      - name: Transpile model and pack bundle
-        if: steps.check.outputs.exists == 'false'
-        env:
-          CACTUS_NO_CLOUD_TELE: "1"
-          HF_HUB_DISABLE_XET: "1"
-          HF_HUB_DISABLE_TELEMETRY: "1"
-          PATH_PREFIX: ${{ github.workspace }}/venv/bin
-        run: |
-          export PATH="$PATH_PREFIX:$PATH"
-          bash flutter/example/tools/build_model_asset.sh
-          test -f flutter/example/assets/model.zip
-
-      - name: Upload bundle to release
-        if: steps.check.outputs.exists == 'false'
+      - name: Transpile missing bundles and upload to release
+        if: steps.missing.outputs.any == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
+          CACTUS_NO_CLOUD_TELE: "1"
+          HF_HUB_DISABLE_XET: "1"
+          HF_HUB_DISABLE_TELEMETRY: "1"
         run: |
           set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/venv/bin:$PATH"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --title "$TAG" --target "$GITHUB_SHA" \
               --notes "Automated Cactus Android build." || true
           fi
-          cp flutter/example/assets/model.zip lfm2.5-350m-int4-bundle.zip
-          gh release upload "$TAG" lfm2.5-350m-int4-bundle.zip --clobber
+          for m in ${{ steps.missing.outputs.list }}; do
+            id="${m%%:*}"; hf="${m##*:}"
+            echo "::group::Transpiling $hf -> $id"
+            python flutter/example/tools/transpile_model.py "$hf" "weights/$id" 4
+            test -f "weights/$id/components/manifest.json"
+            ( cd "weights/$id" && zip -r -1 -q "$GITHUB_WORKSPACE/${id}-bundle.zip" . -x '*.zip' )
+            gh release upload "$TAG" "${id}-bundle.zip" --clobber
+            # Free disk before the next (possibly multi-GB) model.
+            rm -rf "weights/$id" "${id}-bundle.zip" ~/.cache/huggingface
+            echo "::endgroup::"
+          done
 
   apk:
     # Builds the Flutter demo chat app into an installable APK and attaches it to

@@ -1,9 +1,12 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'inference_isolate.dart';
+import 'model_catalog.dart';
 import 'model_manager.dart';
+import 'settings_screen.dart';
 
 void main() {
   runApp(const CactusApp());
@@ -49,6 +52,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final ScrollController _scroll = ScrollController();
 
   final List<ChatMessage> _messages = [];
+  String _activeModelId = kDefaultModelId;
   AppPhase _phase = AppPhase.preparing;
   String _statusText = 'Starting…';
   double? _progress;
@@ -70,23 +74,26 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _bootstrap() async {
     await _engine.start();
-    final existing = await _models.existingModelPath();
-    if (existing != null) {
-      await _loadModel(existing);
-    } else {
-      // Model is bundled in the APK; unpack it automatically on first launch.
-      await _prepareAndLoad();
+    final prefs = await SharedPreferences.getInstance();
+    _activeModelId = prefs.getString('selected_model') ?? kDefaultModelId;
+    // A previously-selected downloadable model may have been cleared; if it's
+    // gone, fall back to the bundled default (which is always available).
+    final spec = modelById(_activeModelId);
+    if (!spec.isBundled && !await _models.isInstalled(spec)) {
+      _activeModelId = kDefaultModelId;
     }
+    await _prepareAndLoad();
   }
 
   Future<void> _prepareAndLoad() async {
+    final spec = modelById(_activeModelId);
     setState(() {
       _phase = AppPhase.downloading;
       _statusText = 'Preparing model…';
       _progress = null;
     });
     try {
-      final path = await _models.ensureModel((phase, progress) {
+      final path = await _models.ensureInstalled(spec, (phase, progress) {
         if (!mounted) return;
         setState(() {
           _statusText = phase;
@@ -97,9 +104,30 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       setState(() {
         _phase = AppPhase.error;
-        _statusText = 'Download failed: $e';
+        _statusText = 'Failed to prepare model: $e';
       });
     }
+  }
+
+  Future<void> _openSettings() async {
+    final newId = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(
+          models: kModelCatalog,
+          activeId: _activeModelId,
+          manager: _models,
+        ),
+      ),
+    );
+    if (newId == null || newId == _activeModelId) return;
+    _activeModelId = newId;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('selected_model', newId);
+    setState(() {
+      _messages.clear();
+      _lastStats = null;
+    });
+    await _prepareAndLoad();
   }
 
   Future<void> _loadModel(String modelDir) async {
@@ -213,6 +241,12 @@ class _ChatScreenState extends State<ChatScreen> {
               tooltip: 'New chat',
               onPressed: (_generating || _messages.isEmpty) ? null : _newChat,
               icon: const Icon(Icons.add_comment_outlined),
+            ),
+          if (_phase == AppPhase.ready)
+            IconButton(
+              tooltip: 'Models',
+              onPressed: _generating ? null : _openSettings,
+              icon: const Icon(Icons.tune),
             ),
         ],
       ),

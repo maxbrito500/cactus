@@ -118,6 +118,12 @@ void _workerMain(SendPort toMain) {
     try {
       switch (cmd) {
         case 'init':
+          // Destroy any currently-loaded model so this also handles switching.
+          final existing = model;
+          if (existing != null) {
+            cactus.cactusDestroy(existing);
+            model = null;
+          }
           model = cactus.cactusInitWithContext(
             m['modelDir'] as String,
             null,
