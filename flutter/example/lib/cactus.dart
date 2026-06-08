@@ -14,6 +14,8 @@ typedef TokenCallbackDart = void Function(
 
 typedef CactusInitNative = CactusModelT Function(
     Pointer<Utf8> modelPath, Pointer<Utf8> corpusDir, Bool cacheIndex);
+typedef CactusInitWithContextNative = CactusModelT Function(
+    Pointer<Utf8> modelPath, Pointer<Utf8> corpusDir, Bool cacheIndex, IntPtr contextSize);
 typedef CactusDestroyNative = Void Function(CactusModelT model);
 typedef CactusResetNative = Void Function(CactusModelT model);
 typedef CactusStopNative = Void Function(CactusModelT model);
@@ -201,6 +203,8 @@ typedef CactusSetTelemetryEnvironmentNative = Void Function(
 
 typedef CactusInitDart = CactusModelT Function(
     Pointer<Utf8> modelPath, Pointer<Utf8> corpusDir, bool cacheIndex);
+typedef CactusInitWithContextDart = CactusModelT Function(
+    Pointer<Utf8> modelPath, Pointer<Utf8> corpusDir, bool cacheIndex, int contextSize);
 typedef CactusDestroyDart = void Function(CactusModelT model);
 typedef CactusResetDart = void Function(CactusModelT model);
 typedef CactusStopDart = void Function(CactusModelT model);
@@ -403,6 +407,8 @@ final _lib = _loadLibrary();
 
 final _cactusInit =
     _lib.lookupFunction<CactusInitNative, CactusInitDart>('cactus_init');
+final _cactusInitWithContext = _lib.lookupFunction<CactusInitWithContextNative,
+    CactusInitWithContextDart>('cactus_init_with_context');
 final _cactusDestroy =
     _lib.lookupFunction<CactusDestroyNative, CactusDestroyDart>('cactus_destroy');
 final _cactusReset =
@@ -592,6 +598,26 @@ CactusModelT cactusInit(String modelPath, String? corpusDir, bool cacheIndex) {
   final corpusDirPtr = corpusDir?.toNativeUtf8() ?? nullptr;
   try {
     final handle = _cactusInit(modelPathPtr, corpusDirPtr, cacheIndex);
+    if (handle == nullptr) {
+      throw Exception('Failed to initialize model: ${cactusGetLastError()}');
+    }
+    return handle;
+  } finally {
+    calloc.free(modelPathPtr);
+    if (corpusDirPtr != nullptr) calloc.free(corpusDirPtr);
+  }
+}
+
+/// Initializes a model with an explicit KV-cache context window (in tokens).
+/// A larger [contextSize] allows longer multi-turn conversations.
+CactusModelT cactusInitWithContext(
+    String modelPath, String? corpusDir, bool cacheIndex, int contextSize) {
+  _ensureFramework();
+  final modelPathPtr = modelPath.toNativeUtf8();
+  final corpusDirPtr = corpusDir?.toNativeUtf8() ?? nullptr;
+  try {
+    final handle =
+        _cactusInitWithContext(modelPathPtr, corpusDirPtr, cacheIndex, contextSize);
     if (handle == nullptr) {
       throw Exception('Failed to initialize model: ${cactusGetLastError()}');
     }

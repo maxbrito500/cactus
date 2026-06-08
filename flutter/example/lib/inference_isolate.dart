@@ -16,6 +16,7 @@ class InferenceEngine {
   late SendPort _toWorker;
 
   Completer<void>? _initCompleter;
+  Completer<void>? _resetCompleter;
   StreamController<String>? _tokenController;
   Completer<Map<String, dynamic>>? _doneCompleter;
 
@@ -43,6 +44,10 @@ class InferenceEngine {
         _initCompleter?.completeError(Exception(m['message']));
         _initCompleter = null;
         break;
+      case 'reset_done':
+        _resetCompleter?.complete();
+        _resetCompleter = null;
+        break;
       case 'token':
         _tokenController?.add(m['text'] as String);
         break;
@@ -63,11 +68,23 @@ class InferenceEngine {
     }
   }
 
-  /// Loads the model from a directory of converted weights.
-  Future<void> initModel(String modelDir) {
+  /// Loads the model from a directory of converted weights with the given
+  /// KV-cache context window (in tokens).
+  Future<void> initModel(String modelDir, {int contextSize = 4096}) {
     _initCompleter = Completer<void>();
-    _toWorker.send({'cmd': 'init', 'modelDir': modelDir});
+    _toWorker.send({
+      'cmd': 'init',
+      'modelDir': modelDir,
+      'contextSize': contextSize,
+    });
     return _initCompleter!.future;
+  }
+
+  /// Clears the conversation KV cache (starts a fresh conversation).
+  Future<void> reset() {
+    _resetCompleter = Completer<void>();
+    _toWorker.send({'cmd': 'reset'});
+    return _resetCompleter!.future;
   }
 
   /// Runs a chat completion. [messagesJson] is a JSON array of
@@ -101,8 +118,18 @@ void _workerMain(SendPort toMain) {
     try {
       switch (cmd) {
         case 'init':
-          model = cactus.cactusInit(m['modelDir'] as String, null, false);
+          model = cactus.cactusInitWithContext(
+            m['modelDir'] as String,
+            null,
+            false,
+            m['contextSize'] as int,
+          );
           toMain.send({'type': 'init_done'});
+          break;
+        case 'reset':
+          final handle = model;
+          if (handle != null) cactus.cactusReset(handle);
+          toMain.send({'type': 'reset_done'});
           break;
         case 'complete':
           final handle = model;

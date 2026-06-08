@@ -355,9 +355,7 @@ const char* cactus_get_last_error() {
     return last_error_message.c_str();
 }
 
-cactus_model_t cactus_init(const char* model_path, const char* corpus_dir, bool cache_index) {
-    constexpr size_t DEFAULT_CONTEXT_SIZE = 512;  // matches default sliding window size
-
+static cactus_model_t cactus_init_impl(const char* model_path, const char* corpus_dir, bool cache_index, size_t context_size) {
     std::string model_path_str = model_path ? std::string(model_path) : "unknown";
 
     std::string model_name = model_path_str;
@@ -389,7 +387,7 @@ cactus_model_t cactus_init(const char* model_path, const char* corpus_dir, bool 
             return nullptr;
         }
 
-        if (!handle->model->init(model_path, DEFAULT_CONTEXT_SIZE)) {
+        if (!handle->model->init(model_path, context_size)) {
             last_error_message = "Failed to initialize model - check weight files at: " + model_path_str;
             CACTUS_LOG_ERROR("init", last_error_message);
             {
@@ -440,6 +438,16 @@ cactus_model_t cactus_init(const char* model_path, const char* corpus_dir, bool 
         }
         return nullptr;
     }
+}
+
+cactus_model_t cactus_init(const char* model_path, const char* corpus_dir, bool cache_index) {
+    // Default context window (kept for backward compatibility).
+    return cactus_init_impl(model_path, corpus_dir, cache_index, 512);
+}
+
+cactus_model_t cactus_init_with_context(const char* model_path, const char* corpus_dir, bool cache_index, size_t context_size) {
+    if (context_size == 0) context_size = 512;
+    return cactus_init_impl(model_path, corpus_dir, cache_index, context_size);
 }
 
 void cactus_destroy(cactus_model_t model) {

@@ -41,6 +41,8 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  static const String _systemPrompt = 'You are a helpful assistant.';
+
   final ModelManager _models = ModelManager();
   final InferenceEngine _engine = InferenceEngine();
   final TextEditingController _input = TextEditingController();
@@ -131,13 +133,14 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     _scrollToBottom();
 
-    // Build the conversation, excluding the still-empty assistant placeholder.
-    final messagesJson = jsonEncode(
-      _messages
+    // Build the conversation: a system prompt followed by the full history
+    // (excluding the still-empty assistant placeholder).
+    final messagesJson = jsonEncode([
+      {'role': 'system', 'content': _systemPrompt},
+      ..._messages
           .where((m) => m != assistant)
-          .map((m) => {'role': m.role, 'content': m.text})
-          .toList(),
-    );
+          .map((m) => {'role': m.role, 'content': m.text}),
+    ]);
     const options = '{"max_tokens":256,"temperature":0.7}';
 
     final run = _engine.complete(messagesJson, optionsJson: options);
@@ -171,6 +174,15 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
   }
 
+  Future<void> _newChat() async {
+    if (_generating) return;
+    await _engine.reset();
+    setState(() {
+      _messages.clear();
+      _lastStats = null;
+    });
+  }
+
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
@@ -191,10 +203,16 @@ class _ChatScreenState extends State<ChatScreen> {
         actions: [
           if (_lastStats != null)
             Padding(
-              padding: const EdgeInsets.only(right: 12),
+              padding: const EdgeInsets.only(right: 4),
               child: Center(
                 child: Text(_lastStats!, style: const TextStyle(fontSize: 12)),
               ),
+            ),
+          if (_phase == AppPhase.ready)
+            IconButton(
+              tooltip: 'New chat',
+              onPressed: (_generating || _messages.isEmpty) ? null : _newChat,
+              icon: const Icon(Icons.add_comment_outlined),
             ),
         ],
       ),

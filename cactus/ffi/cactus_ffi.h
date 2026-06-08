@@ -29,6 +29,16 @@ CACTUS_FFI_EXPORT cactus_model_t cactus_init(
     bool cache_index                        // false = always rebuild index, true = load cached if available
 );
 
+// Like cactus_init, but with an explicit KV-cache context window (in tokens).
+// context_size == 0 falls back to the default. Larger values allow longer
+// multi-turn conversations at the cost of more memory.
+CACTUS_FFI_EXPORT cactus_model_t cactus_init_with_context(
+    const char* model_path,
+    const char* corpus_dir,
+    bool cache_index,
+    size_t context_size
+);
+
 CACTUS_FFI_EXPORT void cactus_destroy(cactus_model_t model);
 CACTUS_FFI_EXPORT void cactus_reset(cactus_model_t model);
 CACTUS_FFI_EXPORT void cactus_stop(cactus_model_t model);
