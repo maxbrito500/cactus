@@ -7,6 +7,6 @@ URL="https://github.com/maxbrito500/cactus/releases/latest/download/cactus-andro
 OUT="$DIR/Eva.apk"
 
 echo "Downloading the latest Eva APK..."
-curl -fL "$URL" -o "$OUT"
+curl -fL --progress-bar "$URL" -o "$OUT"
 echo "Saved: $OUT ($(du -h "$OUT" | cut -f1))"
 echo "Install with: adb install -r \"$OUT\"  (or share the file directly)"
