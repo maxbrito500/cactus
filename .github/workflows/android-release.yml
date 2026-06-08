@@ -144,7 +144,7 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3.12-venv cmake build-essential zip
+          sudo apt-get install -y python3.12-venv cmake build-essential zip libcurl4-openssl-dev
           python3.12 -m venv venv
           venv/bin/pip install --upgrade pip -q
           # arm64 PyPI serves CPU torch wheels by default.
