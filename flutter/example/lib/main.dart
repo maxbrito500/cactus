@@ -10,22 +10,37 @@ import 'model_catalog.dart';
 import 'model_manager.dart';
 import 'settings_screen.dart';
 
-void main() {
-  runApp(const GeogramApp());
+const Color _seedColor = Color(0xFF2E7D32);
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await initThemeMode();
+  runApp(const EvaApp());
 }
 
-class GeogramApp extends StatelessWidget {
-  const GeogramApp({super.key});
+class EvaApp extends StatelessWidget {
+  const EvaApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Geogram chat',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2E7D32)),
-        useMaterial3: true,
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeModeNotifier,
+      builder: (context, mode, _) => MaterialApp(
+        title: 'Eva',
+        theme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(seedColor: _seedColor),
+          useMaterial3: true,
+        ),
+        darkTheme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: _seedColor,
+            brightness: Brightness.dark,
+          ),
+          useMaterial3: true,
+        ),
+        themeMode: mode,
+        home: const ChatScreen(),
       ),
-      home: const ChatScreen(),
     );
   }
 }
@@ -236,7 +251,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Geogram chat'),
+        title: const Text('Eva'),
         actions: [
           if (_lastStats != null)
             Padding(
@@ -354,31 +369,46 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _bubble(ChatMessage m) {
     final isUser = m.role == 'user';
     final scheme = Theme.of(context).colorScheme;
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.8,
-        ),
-        decoration: BoxDecoration(
-          color: isUser ? scheme.primaryContainer : scheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        // User text is shown verbatim; assistant replies are rendered as
-        // markdown (bold, italics, lists, code, …).
-        child: m.text.isEmpty
-            ? const Text('…')
-            : isUser
-                ? Text(m.text)
-                : MarkdownBody(
-                    data: m.text,
-                    shrinkWrap: true,
-                    styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
-                        .copyWith(p: Theme.of(context).textTheme.bodyMedium),
-                  ),
+    final bubble = Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.of(context).size.width * 0.72,
       ),
+      decoration: BoxDecoration(
+        color: isUser ? scheme.primaryContainer : scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      // User text is shown verbatim; assistant replies are rendered as
+      // markdown (bold, italics, lists, code, …).
+      child: m.text.isEmpty
+          ? const Text('…')
+          : isUser
+              ? Text(m.text)
+              : MarkdownBody(
+                  data: m.text,
+                  shrinkWrap: true,
+                  styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
+                      .copyWith(p: Theme.of(context).textTheme.bodyMedium),
+                ),
+    );
+
+    if (isUser) {
+      return Align(alignment: Alignment.centerRight, child: bubble);
+    }
+    // Assistant messages show Eva's avatar, like a chat with her.
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(top: 4, right: 8),
+          child: CircleAvatar(
+            radius: 18,
+            backgroundImage: AssetImage('assets/eva.png'),
+          ),
+        ),
+        Flexible(child: bubble),
+      ],
     );
   }
 }

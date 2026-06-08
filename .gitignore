@@ -50,3 +50,6 @@ vision_activations.json
 gemma-4-eap-extras/
 .githooks/
 ruy
+
+# Eva APK (too large for git; fetched from the release)
+binary/*.apk

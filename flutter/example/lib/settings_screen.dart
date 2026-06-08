@@ -136,6 +136,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.symmetric(vertical: 8),
         children: [
+          _sectionHeader('Appearance'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: ValueListenableBuilder<ThemeMode>(
+              valueListenable: themeModeNotifier,
+              builder: (context, mode, _) => SegmentedButton<ThemeMode>(
+                segments: const [
+                  ButtonSegment(value: ThemeMode.system, label: Text('System')),
+                  ButtonSegment(value: ThemeMode.light, label: Text('Light')),
+                  ButtonSegment(value: ThemeMode.dark, label: Text('Dark')),
+                ],
+                selected: {mode},
+                onSelectionChanged: (s) => setThemeMode(s.first),
+              ),
+            ),
+          ),
+          const Divider(),
           _sectionHeader('Persona'),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),

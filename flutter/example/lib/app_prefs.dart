@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Default persona: a friendly woman named Eva who elaborates on request.
@@ -17,4 +18,33 @@ Future<String> loadSystemPrompt() async {
 Future<void> saveSystemPrompt(String value) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setString(_kSystemPromptKey, value);
+}
+
+// ── Theme ────────────────────────────────────────────────────────────────────
+
+/// Current theme mode; the root app rebuilds when this changes.
+final ValueNotifier<ThemeMode> themeModeNotifier = ValueNotifier(ThemeMode.system);
+
+const String _kThemeModeKey = 'theme_mode';
+
+Future<void> initThemeMode() async {
+  final prefs = await SharedPreferences.getInstance();
+  themeModeNotifier.value = switch (prefs.getString(_kThemeModeKey)) {
+    'light' => ThemeMode.light,
+    'dark' => ThemeMode.dark,
+    _ => ThemeMode.system,
+  };
+}
+
+Future<void> setThemeMode(ThemeMode mode) async {
+  themeModeNotifier.value = mode;
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString(
+    _kThemeModeKey,
+    switch (mode) {
+      ThemeMode.light => 'light',
+      ThemeMode.dark => 'dark',
+      ThemeMode.system => 'system',
+    },
+  );
 }

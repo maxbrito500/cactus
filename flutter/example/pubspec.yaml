@@ -74,6 +74,7 @@ flutter:
   # commit; CI fetches it from the GitHub release before building).
   assets:
     - assets/model.zip
+    - assets/eva.png
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
