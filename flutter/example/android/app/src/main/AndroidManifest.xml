@@ -1,8 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Required to download the model weights on first launch. -->
+    <!-- Required to download model bundles. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Required to scan a user-chosen folder for sideloaded models. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
     <application
-        android:label="cactus_example"
+        android:label="Geogram chat"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

@@ -1,24 +1,26 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app_prefs.dart';
 import 'inference_isolate.dart';
 import 'model_catalog.dart';
 import 'model_manager.dart';
 import 'settings_screen.dart';
 
 void main() {
-  runApp(const CactusApp());
+  runApp(const GeogramApp());
 }
 
-class CactusApp extends StatelessWidget {
-  const CactusApp({super.key});
+class GeogramApp extends StatelessWidget {
+  const GeogramApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Cactus Chat',
+      title: 'Geogram chat',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2E7D32)),
         useMaterial3: true,
@@ -44,14 +46,14 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  static const String _systemPrompt = 'You are a helpful assistant.';
-
   final ModelManager _models = ModelManager();
   final InferenceEngine _engine = InferenceEngine();
   final TextEditingController _input = TextEditingController();
   final ScrollController _scroll = ScrollController();
 
   final List<ChatMessage> _messages = [];
+  String _systemPrompt = kDefaultSystemPrompt;
+  List<ModelSpec> _catalog = kBuiltinCatalog;
   String _activeModelId = kDefaultModelId;
   AppPhase _phase = AppPhase.preparing;
   String _statusText = 'Starting…';
@@ -74,11 +76,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _bootstrap() async {
     await _engine.start();
+    _systemPrompt = await loadSystemPrompt();
+    _catalog = await loadCatalog();
     final prefs = await SharedPreferences.getInstance();
     _activeModelId = prefs.getString('selected_model') ?? kDefaultModelId;
-    // A previously-selected downloadable model may have been cleared; if it's
-    // gone, fall back to the bundled default (which is always available).
-    final spec = modelById(_activeModelId);
+    // A previously-selected non-bundled model may be gone; if so, fall back to
+    // the bundled default (which is always available).
+    final spec = modelById(_catalog, _activeModelId);
     if (!spec.isBundled && !await _models.isInstalled(spec)) {
       _activeModelId = kDefaultModelId;
     }
@@ -86,7 +90,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _prepareAndLoad() async {
-    final spec = modelById(_activeModelId);
+    final spec = modelById(_catalog, _activeModelId);
     setState(() {
       _phase = AppPhase.downloading;
       _statusText = 'Preparing model…';
@@ -113,13 +117,18 @@ class _ChatScreenState extends State<ChatScreen> {
     final newId = await Navigator.of(context).push<String>(
       MaterialPageRoute(
         builder: (_) => SettingsScreen(
-          models: kModelCatalog,
           activeId: _activeModelId,
           manager: _models,
         ),
       ),
     );
-    if (newId == null || newId == _activeModelId) return;
+    // Persona and sideloaded models may have changed — reload them.
+    _systemPrompt = await loadSystemPrompt();
+    _catalog = await loadCatalog();
+    if (newId == null || newId == _activeModelId) {
+      if (mounted) setState(() {});
+      return;
+    }
     _activeModelId = newId;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('selected_model', newId);
@@ -227,7 +236,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Cactus Chat'),
+        title: const Text('Geogram chat'),
         actions: [
           if (_lastStats != null)
             Padding(
@@ -357,7 +366,18 @@ class _ChatScreenState extends State<ChatScreen> {
           color: isUser ? scheme.primaryContainer : scheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(16),
         ),
-        child: Text(m.text.isEmpty ? '…' : m.text),
+        // User text is shown verbatim; assistant replies are rendered as
+        // markdown (bold, italics, lists, code, …).
+        child: m.text.isEmpty
+            ? const Text('…')
+            : isUser
+                ? Text(m.text)
+                : MarkdownBody(
+                    data: m.text,
+                    shrinkWrap: true,
+                    styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
+                        .copyWith(p: Theme.of(context).textTheme.bodyMedium),
+                  ),
       ),
     );
   }

@@ -36,19 +36,23 @@ class ModelManager {
     return true;
   }
 
-  /// Whether a usable copy of [spec] is already on disk.
-  Future<bool> isInstalled(ModelSpec spec) async =>
-      _isValid(await _modelDir(spec.id));
-
-  /// Returns the model directory if installed, else null.
-  Future<String?> installedPath(ModelSpec spec) async {
-    final dir = await _modelDir(spec.id);
-    return await _isValid(dir) ? dir.path : null;
+  /// Whether a usable copy of [spec] is already available.
+  Future<bool> isInstalled(ModelSpec spec) async {
+    if (spec.isSideloaded) return _isValid(Directory(spec.localPath!));
+    return _isValid(await _modelDir(spec.id));
   }
 
-  /// Ensures [spec] is installed (unpacking the bundled asset or downloading the
-  /// bundle), returning its directory. No-ops if already present.
+  /// Ensures [spec] is available, returning its directory. Sideloaded models are
+  /// used in place; bundled/downloaded models are unpacked into app storage.
   Future<String> ensureInstalled(ModelSpec spec, ProgressCallback onProgress) async {
+    if (spec.isSideloaded) {
+      final dir = Directory(spec.localPath!);
+      if (!await _isValid(dir)) {
+        throw Exception('Model folder not found or invalid: ${spec.localPath}');
+      }
+      return dir.path;
+    }
+
     final modelDir = await _modelDir(spec.id);
     if (await _isValid(modelDir)) return modelDir.path;
 
@@ -71,7 +75,6 @@ class ModelManager {
     _promoteSingleRoot(modelDir);
 
     if (!await _isValid(modelDir)) {
-      // Leave no half-extracted directory behind.
       try {
         await modelDir.delete(recursive: true);
       } catch (_) {}
@@ -83,27 +86,87 @@ class ModelManager {
     return modelDir.path;
   }
 
-  Future<void> _download(String url, String zipPath, ProgressCallback onProgress) async {
-    onProgress('Downloading…', 0);
+  /// Scans [folder] (and its immediate subfolders) for valid Cactus model
+  /// directories the user can use directly.
+  Future<List<ModelSpec>> scanFolder(String folder) async {
+    final root = Directory(folder);
+    final found = <ModelSpec>[];
+
+    Future<void> consider(Directory d) async {
+      if (await _isValid(d)) {
+        final name = d.path.split(Platform.pathSeparator).last;
+        found.add(ModelSpec(
+          id: 'sideload:${d.path}',
+          name: name,
+          sizeLabel: 'on device',
+          localPath: d.path,
+        ));
+      }
+    }
+
+    if (!await root.exists()) return found;
+    await consider(root);
+    if (found.isEmpty) {
+      for (final entry in root.listSync()) {
+        if (entry is Directory) await consider(entry);
+      }
+    }
+    return found;
+  }
+
+  /// Streams the bundle to a `.part` file with HTTP Range resume. If a previous
+  /// attempt left a partial file, the download continues from where it stopped;
+  /// on completion the `.part` is promoted to the final zip.
+  Future<void> _download(String url, String finalZipPath, ProgressCallback onProgress) async {
+    final partFile = File('$finalZipPath.part');
+    var existing = await partFile.exists() ? await partFile.length() : 0;
+
+    onProgress(existing > 0 ? 'Resuming download…' : 'Downloading…', null);
     final client = http.Client();
     try {
-      final resp = await client.send(http.Request('GET', Uri.parse(url)));
-      if (resp.statusCode != 200) {
+      final req = http.Request('GET', Uri.parse(url));
+      if (existing > 0) req.headers['range'] = 'bytes=$existing-';
+      final resp = await client.send(req);
+
+      int total;
+      IOSink sink;
+      if (resp.statusCode == 206) {
+        total = _contentRangeTotal(resp.headers['content-range']) ??
+            (existing + (resp.contentLength ?? 0));
+        sink = partFile.openWrite(mode: FileMode.append);
+      } else if (resp.statusCode == 200) {
+        existing = 0; // server ignored the range — restart cleanly
+        total = resp.contentLength ?? 0;
+        sink = partFile.openWrite();
+      } else {
         throw Exception('Download failed: HTTP ${resp.statusCode}');
       }
-      final total = resp.contentLength ?? 0;
-      var received = 0;
-      final sink = File(zipPath).openWrite();
-      await for (final chunk in resp.stream) {
-        sink.add(chunk);
-        received += chunk.length;
-        if (total > 0) onProgress('Downloading…', received / total);
+
+      var received = existing;
+      try {
+        await for (final chunk in resp.stream) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (total > 0) onProgress('Downloading…', received / total);
+        }
+      } finally {
+        await sink.close(); // flush whatever we got (partial survives for resume)
       }
-      await sink.close();
     } finally {
       client.close();
     }
+
+    if (await File(finalZipPath).exists()) await File(finalZipPath).delete();
+    await partFile.rename(finalZipPath);
   }
+}
+
+int? _contentRangeTotal(String? header) {
+  // e.g. "bytes 200-1004/1005" -> 1005
+  if (header == null) return null;
+  final slash = header.lastIndexOf('/');
+  if (slash < 0) return null;
+  return int.tryParse(header.substring(slash + 1).trim());
 }
 
 /// Runs inside an `Isolate.run` — extracts the zip to [outDirPath].

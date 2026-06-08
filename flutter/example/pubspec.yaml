@@ -41,6 +41,11 @@ dependencies:
   path_provider: ^2.1.4
   # Remembers the selected model across launches.
   shared_preferences: ^2.3.0
+  # Render markdown in assistant replies.
+  flutter_markdown: ^0.7.4
+  # Pick a folder to sideload models from + request storage access.
+  file_picker: ^8.1.0
+  permission_handler: ^11.3.1
 
 dev_dependencies:
   flutter_test:

@@ -1,14 +1,18 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 
+import 'app_prefs.dart';
 import 'model_catalog.dart';
 import 'model_manager.dart';
 
-/// Lets the user download additional models and pick which one is active.
-/// Pops with the selected model id when the user switches (null if unchanged).
+/// Lets the user edit the assistant persona, download/select models, and
+/// sideload models from a folder. Pops with the selected model id when the user
+/// switches model (null if unchanged). Persona + sideloaded models are saved to
+/// preferences, so the host reloads them on return.
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
-    required this.models,
     required this.activeId,
     required this.manager,
   });
@@ -16,27 +20,40 @@ class SettingsScreen extends StatefulWidget {
   final ModelManager manager;
   final String activeId;
 
-  /// Catalog passed in so the host owns the source of truth.
-  final List<ModelSpec> models;
-
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  final TextEditingController _prompt = TextEditingController();
+  List<ModelSpec> _catalog = const [];
   final Set<String> _installed = {};
   String? _downloadingId;
   double? _downloadProgress;
+  bool _scanning = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _refreshInstalled();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _prompt.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    _prompt.text = await loadSystemPrompt();
+    _catalog = await loadCatalog();
+    await _refreshInstalled();
   }
 
   Future<void> _refreshInstalled() async {
-    for (final m in widget.models) {
+    _installed.clear();
+    for (final m in _catalog) {
       if (await widget.manager.isInstalled(m)) _installed.add(m.id);
     }
     if (mounted) setState(() {});
@@ -45,15 +62,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _download(ModelSpec spec) async {
     setState(() {
       _downloadingId = spec.id;
-      _downloadProgress = 0;
+      _downloadProgress = null;
       _error = null;
     });
     try {
       await widget.manager.ensureInstalled(spec, (phase, progress) {
-        if (!mounted) return;
-        setState(() => _downloadProgress = progress);
+        if (mounted) setState(() => _downloadProgress = progress);
       });
-      setState(() => _installed.add(spec.id));
+      _installed.add(spec.id);
     } catch (e) {
       setState(() => _error = 'Download failed: $e');
     } finally {
@@ -66,23 +82,113 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _addFromFolder() async {
+    setState(() {
+      _error = null;
+      _scanning = true;
+    });
+    try {
+      // Reading an arbitrary folder needs All-files access on Android 11+.
+      var status = await Permission.manageExternalStorage.status;
+      if (!status.isGranted) status = await Permission.manageExternalStorage.request();
+      if (!status.isGranted) {
+        setState(() => _error = 'Storage permission is required to scan a folder.');
+        return;
+      }
+
+      final dir = await FilePicker.platform.getDirectoryPath();
+      if (dir == null) return; // cancelled
+
+      final found = await widget.manager.scanFolder(dir);
+      if (found.isEmpty) {
+        setState(() => _error = 'No Cactus models found in that folder.');
+        return;
+      }
+
+      final existing = await loadSideloadedModels();
+      final byId = {for (final m in existing) m.id: m};
+      for (final m in found) {
+        byId[m.id] = m; // dedupe by id (sideload:<path>)
+      }
+      await saveSideloadedModels(byId.values.toList());
+      _catalog = await loadCatalog();
+      await _refreshInstalled();
+    } catch (e) {
+      setState(() => _error = 'Could not scan folder: $e');
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  Future<void> _removeSideloaded(ModelSpec spec) async {
+    final remaining =
+        (await loadSideloadedModels()).where((m) => m.id != spec.id).toList();
+    await saveSideloadedModels(remaining);
+    _catalog = await loadCatalog();
+    await _refreshInstalled();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final busy = _downloadingId != null || _scanning;
     return Scaffold(
-      appBar: AppBar(title: const Text('Models')),
+      appBar: AppBar(title: const Text('Settings')),
       body: ListView(
+        padding: const EdgeInsets.symmetric(vertical: 8),
         children: [
+          _sectionHeader('Persona'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: TextField(
+              controller: _prompt,
+              minLines: 3,
+              maxLines: 6,
+              onChanged: saveSystemPrompt,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'System prompt',
+                helperText: 'How the assistant should behave. Saved automatically.',
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: () {
+                  _prompt.text = kDefaultSystemPrompt;
+                  saveSystemPrompt(kDefaultSystemPrompt);
+                },
+                child: const Text('Reset to default'),
+              ),
+            ),
+          ),
+          const Divider(),
+          _sectionHeader('Models'),
           if (_error != null)
             Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
               child: Text(_error!, style: const TextStyle(color: Colors.red)),
             ),
-          for (final m in widget.models) _modelTile(m),
+          for (final m in _catalog) _modelTile(m, busy),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: OutlinedButton.icon(
+              onPressed: busy ? null : _addFromFolder,
+              icon: _scanning
+                  ? const SizedBox(
+                      width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.folder_open),
+              label: const Text('Add models from a folder…'),
+            ),
+          ),
           const Padding(
-            padding: EdgeInsets.all(16),
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
             child: Text(
-              'Larger models are stronger but download more data and run slower '
-              'on-device. The default model is built into the app.',
+              'Downloaded models live in the app. You can also point to a folder '
+              '(e.g. an SD card) that already contains extracted Cactus models. '
+              'Larger models are stronger but slower and use more memory.',
               style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ),
@@ -91,11 +197,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _modelTile(ModelSpec m) {
+  Widget _sectionHeader(String text) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        child: Text(text,
+            style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: Theme.of(context).colorScheme.primary)),
+      );
+
+  Widget _modelTile(ModelSpec m, bool busy) {
     final isActive = m.id == widget.activeId;
     final isInstalled = _installed.contains(m.id);
     final isDownloading = _downloadingId == m.id;
-    final busy = _downloadingId != null;
 
     Widget trailing;
     if (isActive) {
@@ -113,7 +226,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 4),
             Text(
               _downloadProgress == null
-                  ? 'Unpacking…'
+                  ? 'Working…'
                   : '${(_downloadProgress! * 100).toStringAsFixed(0)}%',
               style: const TextStyle(fontSize: 11),
             ),
@@ -137,6 +250,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       title: Text(m.name),
       subtitle: Text(m.sizeLabel),
       trailing: trailing,
+      leading: m.isSideloaded && !isActive
+          ? IconButton(
+              tooltip: 'Remove',
+              icon: const Icon(Icons.delete_outline),
+              onPressed: busy ? null : () => _removeSideloaded(m),
+            )
+          : null,
     );
   }
 }
