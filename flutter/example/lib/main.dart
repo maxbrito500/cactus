@@ -1,0 +1,312 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+
+import 'inference_isolate.dart';
+import 'model_manager.dart';
+
+void main() {
+  runApp(const CactusApp());
+}
+
+class CactusApp extends StatelessWidget {
+  const CactusApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Cactus Chat',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2E7D32)),
+        useMaterial3: true,
+      ),
+      home: const ChatScreen(),
+    );
+  }
+}
+
+enum AppPhase { preparing, downloading, loadingModel, ready, error }
+
+class ChatMessage {
+  ChatMessage(this.role, this.text);
+  final String role; // 'user' or 'assistant'
+  String text;
+}
+
+class ChatScreen extends StatefulWidget {
+  const ChatScreen({super.key});
+
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  final ModelManager _models = ModelManager();
+  final InferenceEngine _engine = InferenceEngine();
+  final TextEditingController _input = TextEditingController();
+  final ScrollController _scroll = ScrollController();
+
+  final List<ChatMessage> _messages = [];
+  AppPhase _phase = AppPhase.preparing;
+  String _statusText = 'Starting…';
+  double? _progress;
+  String? _lastStats;
+  bool _generating = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap();
+  }
+
+  @override
+  void dispose() {
+    _input.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  Future<void> _bootstrap() async {
+    await _engine.start();
+    final existing = await _models.existingModelPath();
+    if (existing != null) {
+      await _loadModel(existing);
+    } else {
+      // Model is bundled in the APK; unpack it automatically on first launch.
+      await _prepareAndLoad();
+    }
+  }
+
+  Future<void> _prepareAndLoad() async {
+    setState(() {
+      _phase = AppPhase.downloading;
+      _statusText = 'Preparing model…';
+      _progress = null;
+    });
+    try {
+      final path = await _models.ensureModel((phase, progress) {
+        if (!mounted) return;
+        setState(() {
+          _statusText = phase;
+          _progress = progress;
+        });
+      });
+      await _loadModel(path);
+    } catch (e) {
+      setState(() {
+        _phase = AppPhase.error;
+        _statusText = 'Download failed: $e';
+      });
+    }
+  }
+
+  Future<void> _loadModel(String modelDir) async {
+    setState(() {
+      _phase = AppPhase.loadingModel;
+      _statusText = 'Loading model…';
+      _progress = null;
+    });
+    try {
+      await _engine.initModel(modelDir);
+      setState(() => _phase = AppPhase.ready);
+    } catch (e) {
+      setState(() {
+        _phase = AppPhase.error;
+        _statusText = 'Failed to load model: $e';
+      });
+    }
+  }
+
+  Future<void> _send() async {
+    final text = _input.text.trim();
+    if (text.isEmpty || _generating) return;
+    _input.clear();
+
+    final assistant = ChatMessage('assistant', '');
+    setState(() {
+      _messages.add(ChatMessage('user', text));
+      _messages.add(assistant);
+      _generating = true;
+      _lastStats = null;
+    });
+    _scrollToBottom();
+
+    // Build the conversation, excluding the still-empty assistant placeholder.
+    final messagesJson = jsonEncode(
+      _messages
+          .where((m) => m != assistant)
+          .map((m) => {'role': m.role, 'content': m.text})
+          .toList(),
+    );
+    const options = '{"max_tokens":256,"temperature":0.7}';
+
+    final run = _engine.complete(messagesJson, optionsJson: options);
+    run.tokens.listen(
+      (token) {
+        setState(() => assistant.text += token);
+        _scrollToBottom();
+      },
+      onError: (e) {
+        setState(() {
+          assistant.text += '\n[error: $e]';
+          _generating = false;
+        });
+      },
+    );
+    try {
+      final stats = await run.stats;
+      // Fall back to the authoritative full response if streaming was empty.
+      final full = (stats['response'] as String?)?.trim();
+      if (assistant.text.isEmpty && full != null && full.isNotEmpty) {
+        setState(() => assistant.text = full);
+      }
+      final tps = stats['decode_tps'];
+      setState(() {
+        _generating = false;
+        if (tps is num) _lastStats = '${tps.toStringAsFixed(1)} tok/s';
+      });
+    } catch (_) {
+      setState(() => _generating = false);
+    }
+    _scrollToBottom();
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.animateTo(
+          _scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Cactus Chat'),
+        actions: [
+          if (_lastStats != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 12),
+              child: Center(
+                child: Text(_lastStats!, style: const TextStyle(fontSize: 12)),
+              ),
+            ),
+        ],
+      ),
+      body: switch (_phase) {
+        AppPhase.ready => _buildChat(),
+        AppPhase.error => _buildError(),
+        _ => _buildLoading(),
+      },
+    );
+  }
+
+  Widget _buildLoading() {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CircularProgressIndicator(value: _progress),
+          const SizedBox(height: 16),
+          Text(_statusText),
+          if (_progress != null) ...[
+            const SizedBox(height: 8),
+            Text('${(_progress! * 100).toStringAsFixed(0)}%'),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildError() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.error_outline, size: 64, color: Colors.red),
+            const SizedBox(height: 16),
+            Text(_statusText, textAlign: TextAlign.center),
+            const SizedBox(height: 24),
+            FilledButton(onPressed: _bootstrap, child: const Text('Retry')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChat() {
+    return Column(
+      children: [
+        Expanded(
+          child: _messages.isEmpty
+              ? const Center(child: Text('Say hello to start chatting.'))
+              : ListView.builder(
+                  controller: _scroll,
+                  padding: const EdgeInsets.all(12),
+                  itemCount: _messages.length,
+                  itemBuilder: (context, i) => _bubble(_messages[i]),
+                ),
+        ),
+        const Divider(height: 1),
+        Padding(
+          padding: const EdgeInsets.all(8),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _input,
+                  minLines: 1,
+                  maxLines: 4,
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) => _send(),
+                  decoration: const InputDecoration(
+                    hintText: 'Message',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filled(
+                onPressed: _generating ? null : _send,
+                icon: _generating
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.send),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _bubble(ChatMessage m) {
+    final isUser = m.role == 'user';
+    final scheme = Theme.of(context).colorScheme;
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.8,
+        ),
+        decoration: BoxDecoration(
+          color: isUser ? scheme.primaryContainer : scheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Text(m.text.isEmpty ? '…' : m.text),
+      ),
+    );
+  }
+}
