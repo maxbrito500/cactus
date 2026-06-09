@@ -48,3 +48,39 @@ Future<void> setThemeMode(ThemeMode mode) async {
     },
   );
 }
+
+// ── Voice input ──────────────────────────────────────────────────────────────
+
+/// Which speech-to-text engine the mic button uses.
+/// - [fast]: the bundled offline streaming model (English only).
+/// - [system]: the phone's built-in recognizer (many languages, incl. the
+///   system language; uses Android's speech service).
+enum VoiceEngine { fast, system }
+
+const String _kVoiceEngineKey = 'voice_engine';
+const String _kVoiceLocaleKey = 'voice_locale';
+
+Future<VoiceEngine> loadVoiceEngine() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getString(_kVoiceEngineKey) == 'system'
+      ? VoiceEngine.system
+      : VoiceEngine.fast;
+}
+
+Future<void> saveVoiceEngine(VoiceEngine engine) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString(
+      _kVoiceEngineKey, engine == VoiceEngine.system ? 'system' : 'fast');
+}
+
+/// Locale id for the system recognizer (e.g. `pt_BR`). Empty means "auto" —
+/// fall back to the device's system locale / let the recognizer decide.
+Future<String> loadVoiceLocale() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getString(_kVoiceLocaleKey) ?? '';
+}
+
+Future<void> saveVoiceLocale(String localeId) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString(_kVoiceLocaleKey, localeId);
+}

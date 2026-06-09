@@ -52,6 +52,9 @@ dependencies:
   sherpa_onnx: ^1.13.2
   # Microphone PCM stream feeding the recognizer.
   record: ^6.1.2
+  # Optional: the phone's built-in recognizer for many languages (incl. the
+  # system language), as an alternative to the bundled English model.
+  speech_to_text: ^7.0.0
 
 dev_dependencies:
   flutter_test:

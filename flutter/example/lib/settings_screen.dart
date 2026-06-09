@@ -1,10 +1,12 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import 'app_prefs.dart';
 import 'model_catalog.dart';
 import 'model_manager.dart';
+import 'system_voice.dart';
 import 'voice_service.dart';
 
 /// Lets the user edit the assistant persona, download/select models, and
@@ -28,6 +30,7 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _prompt = TextEditingController();
   final VoiceService _voice = VoiceService();
+  final SystemVoiceService _systemVoice = SystemVoiceService();
   List<ModelSpec> _catalog = const [];
   final Set<String> _installed = {};
   String? _downloadingId;
@@ -36,6 +39,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _voiceInstalled = false;
   bool _voiceDownloading = false;
   double? _voiceProgress;
+  VoiceEngine _voiceEngine = VoiceEngine.fast;
+  String _voiceLocale = '';
+  List<stt.LocaleName> _locales = const [];
+  bool _localesLoading = false;
   String? _error;
 
   @override
@@ -48,6 +55,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void dispose() {
     _prompt.dispose();
     _voice.dispose();
+    _systemVoice.dispose();
     super.dispose();
   }
 
@@ -55,7 +63,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _prompt.text = await loadSystemPrompt();
     _catalog = await loadCatalog();
     _voiceInstalled = await _voice.isModelInstalled();
+    _voiceEngine = await loadVoiceEngine();
+    _voiceLocale = await loadVoiceLocale();
     await _refreshInstalled();
+    if (_voiceEngine == VoiceEngine.system) _loadLocales();
+  }
+
+  /// Loads the device's available recognition locales (for the system engine).
+  Future<void> _loadLocales() async {
+    if (_locales.isNotEmpty || _localesLoading) return;
+    setState(() => _localesLoading = true);
+    try {
+      final ls = await _systemVoice.locales();
+      ls.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      if (mounted) setState(() => _locales = ls);
+    } catch (_) {
+      // Recognizer unavailable — the dropdown will just offer "Auto".
+    } finally {
+      if (mounted) setState(() => _localesLoading = false);
+    }
   }
 
   Future<void> _downloadVoice() async {
@@ -242,16 +268,97 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 8),
           const Divider(),
           _sectionHeader('Voice'),
-          _voiceTile(busy),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: Text(
-              'Talk to Eva with offline speech-to-text. Tap the microphone in the '
-              'chat to dictate; the speech model is downloaded once and works '
-              'fully offline afterwards.',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: SegmentedButton<VoiceEngine>(
+              segments: const [
+                ButtonSegment(
+                  value: VoiceEngine.fast,
+                  label: Text('English'),
+                  icon: Icon(Icons.bolt),
+                ),
+                ButtonSegment(
+                  value: VoiceEngine.system,
+                  label: Text('System'),
+                  icon: Icon(Icons.language),
+                ),
+              ],
+              selected: {_voiceEngine},
+              onSelectionChanged: busy
+                  ? null
+                  : (s) async {
+                      final e = s.first;
+                      setState(() => _voiceEngine = e);
+                      await saveVoiceEngine(e);
+                      if (e == VoiceEngine.system) _loadLocales();
+                    },
             ),
           ),
+          if (_voiceEngine == VoiceEngine.fast) ...[
+            _voiceTile(busy),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Text(
+                'A fast, fully offline English model. Tap the microphone in the '
+                'chat to dictate; the model is downloaded once.',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ),
+          ] else ...[
+            _systemVoiceConfig(),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Text(
+                "Uses the phone's built-in speech recognition (many languages, "
+                'including the system language). Choose a language or leave it on '
+                'Auto. Works offline where the language pack is installed.',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _systemVoiceConfig() {
+    // The dropdown value must be one of the item values; fall back to Auto ('')
+    // until the device locales have loaded.
+    final values = {'', for (final l in _locales) l.localeId};
+    final value = values.contains(_voiceLocale) ? _voiceLocale : '';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: DropdownButtonFormField<String>(
+              initialValue: value,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Language',
+                border: OutlineInputBorder(),
+              ),
+              items: [
+                const DropdownMenuItem(
+                    value: '', child: Text('Auto (system language)')),
+                for (final l in _locales)
+                  DropdownMenuItem(value: l.localeId, child: Text(l.name)),
+              ],
+              onChanged: (v) async {
+                if (v == null) return;
+                setState(() => _voiceLocale = v);
+                await saveVoiceLocale(v);
+              },
+            ),
+          ),
+          if (_localesLoading)
+            const Padding(
+              padding: EdgeInsets.only(left: 12),
+              child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+            ),
         ],
       ),
     );

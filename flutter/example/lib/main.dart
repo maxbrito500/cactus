@@ -11,6 +11,7 @@ import 'inference_isolate.dart';
 import 'model_catalog.dart';
 import 'model_manager.dart';
 import 'settings_screen.dart';
+import 'system_voice.dart';
 import 'voice_service.dart';
 
 const Color _seedColor = Color(0xFF2E7D32);
@@ -74,7 +75,10 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<ChatMessage> _messages = [];
   final ImagePicker _picker = ImagePicker();
   final VoiceService _voice = VoiceService();
+  final SystemVoiceService _systemVoice = SystemVoiceService();
   bool _listening = false;
+  VoiceEngine _voiceEngine = VoiceEngine.fast;
+  String _voiceLocale = '';
   String _systemPrompt = kDefaultSystemPrompt;
   List<ModelSpec> _catalog = kBuiltinCatalog;
   String _activeModelId = kDefaultModelId;
@@ -100,12 +104,15 @@ class _ChatScreenState extends State<ChatScreen> {
     _input.dispose();
     _scroll.dispose();
     _voice.dispose();
+    _systemVoice.dispose();
     super.dispose();
   }
 
   Future<void> _bootstrap() async {
     await _engine.start();
     _systemPrompt = await loadSystemPrompt();
+    _voiceEngine = await loadVoiceEngine();
+    _voiceLocale = await loadVoiceLocale();
     _catalog = await loadCatalog();
     final prefs = await SharedPreferences.getInstance();
     _activeModelId = prefs.getString('selected_model') ?? kDefaultModelId;
@@ -151,8 +158,10 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       ),
     );
-    // Persona and sideloaded models may have changed — reload them.
+    // Persona, voice settings and sideloaded models may have changed — reload.
     _systemPrompt = await loadSystemPrompt();
+    _voiceEngine = await loadVoiceEngine();
+    _voiceLocale = await loadVoiceLocale();
     _catalog = await loadCatalog();
     if (newId == null || newId == _activeModelId) {
       if (mounted) setState(() {});
@@ -192,8 +201,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty && imagePath == null) return;
     if (_generating) return;
     // Sending finalizes any in-progress dictation.
-    if (_voice.isListening) {
+    if (_voice.isListening || _systemVoice.isListening) {
       await _voice.stop();
+      await _systemVoice.stop();
       if (mounted) setState(() => _listening = false);
     }
     if (text.isEmpty && imagePath != null) text = 'What is in this image?';
@@ -268,20 +278,33 @@ class _ChatScreenState extends State<ChatScreen> {
   /// live transcript into the message field. On first use it downloads the
   /// (offline) speech model.
   Future<void> _toggleVoice() async {
-    if (_voice.isListening) {
+    // Already listening (on either engine) → stop.
+    if (_voice.isListening || _systemVoice.isListening) {
       await _voice.stop();
+      await _systemVoice.stop();
       if (mounted) setState(() => _listening = false);
       return;
     }
-    if (!await _ensureVoiceModel()) return;
+    void onText(String text) {
+      _input.text = text;
+      _input.selection = TextSelection.collapsed(offset: text.length);
+    }
+
     try {
-      await _voice.start((text) {
-        _input.text = text;
-        _input.selection = TextSelection.collapsed(offset: text.length);
-      });
+      if (_voiceEngine == VoiceEngine.system) {
+        // The phone's recognizer (many languages, incl. the system language).
+        await _systemVoice.start(_voiceLocale, onText, onStopped: () {
+          if (mounted) setState(() => _listening = false);
+        });
+      } else {
+        // The bundled offline English model — download it on first use.
+        if (!await _ensureVoiceModel()) return;
+        await _voice.start(onText);
+      }
       if (mounted) setState(() => _listening = true);
     } catch (e) {
       if (mounted) {
+        setState(() => _listening = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Voice unavailable: $e')),
         );
