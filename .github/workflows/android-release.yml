@@ -135,7 +135,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          MODELS="lfm2.5-350m-int4:LiquidAI/LFM2.5-350M qwen3-1.7b-int4:Qwen/Qwen3-1.7B"
+          MODELS="lfm2.5-350m-int4:LiquidAI/LFM2.5-350M qwen3-1.7b-int4:Qwen/Qwen3-1.7B lfm2-vl-450m-int4:LiquidAI/LFM2-VL-450M lfm2.5-vl-1.6b-int4:LiquidAI/LFM2.5-VL-1.6B"
           assets=$(gh release view "$TAG" 2>/dev/null || true)
           missing=""
           for m in $MODELS; do

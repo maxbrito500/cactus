@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_prefs.dart';
@@ -48,9 +50,11 @@ class EvaApp extends StatelessWidget {
 enum AppPhase { preparing, downloading, loadingModel, ready, error }
 
 class ChatMessage {
-  ChatMessage(this.role, this.text);
+  ChatMessage(this.role, this.text, {this.imagePath});
   final String role; // 'user' or 'assistant'
   String text;
+  // Absolute path of an image the user attached to this message (vision chat).
+  final String? imagePath;
 }
 
 class ChatScreen extends StatefulWidget {
@@ -67,6 +71,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final ScrollController _scroll = ScrollController();
 
   final List<ChatMessage> _messages = [];
+  final ImagePicker _picker = ImagePicker();
   String _systemPrompt = kDefaultSystemPrompt;
   List<ModelSpec> _catalog = kBuiltinCatalog;
   String _activeModelId = kDefaultModelId;
@@ -75,6 +80,11 @@ class _ChatScreenState extends State<ChatScreen> {
   double? _progress;
   String? _lastStats;
   bool _generating = false;
+  // Image queued by the user for the next message (vision models only).
+  String? _pendingImagePath;
+
+  /// Whether the active model can see images (exposes the attach button).
+  bool get _visionActive => modelById(_catalog, _activeModelId).isVision;
 
   @override
   void initState() {
@@ -172,26 +182,35 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _send() async {
-    final text = _input.text.trim();
-    if (text.isEmpty || _generating) return;
+    var text = _input.text.trim();
+    final imagePath = _pendingImagePath;
+    // Allow sending an image on its own with a sensible default question.
+    if (text.isEmpty && imagePath == null) return;
+    if (_generating) return;
+    if (text.isEmpty && imagePath != null) text = 'What is in this image?';
     _input.clear();
 
     final assistant = ChatMessage('assistant', '');
     setState(() {
-      _messages.add(ChatMessage('user', text));
+      _messages.add(ChatMessage('user', text, imagePath: imagePath));
       _messages.add(assistant);
       _generating = true;
       _lastStats = null;
+      _pendingImagePath = null;
     });
     _scrollToBottom();
 
     // Build the conversation: a system prompt followed by the full history
-    // (excluding the still-empty assistant placeholder).
+    // (excluding the still-empty assistant placeholder). A user turn that has
+    // an attached image carries it in an `images` array, which the engine's
+    // vision encoder reads.
     final messagesJson = jsonEncode([
       {'role': 'system', 'content': _systemPrompt},
-      ..._messages
-          .where((m) => m != assistant)
-          .map((m) => {'role': m.role, 'content': m.text}),
+      ..._messages.where((m) => m != assistant).map((m) {
+        final msg = <String, dynamic>{'role': m.role, 'content': m.text};
+        if (m.imagePath != null) msg['images'] = [m.imagePath];
+        return msg;
+      }),
     ]);
     const options = '{"max_tokens":256,"temperature":0.7}';
 
@@ -232,7 +251,50 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _messages.clear();
       _lastStats = null;
+      _pendingImagePath = null;
     });
+  }
+
+  /// Lets the user attach a photo (camera or gallery) to the next message.
+  Future<void> _attachImage() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('Take a photo'),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Choose from gallery'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (source == null) return;
+    try {
+      final picked = await _picker.pickImage(
+        source: source,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 90,
+      );
+      if (picked != null) {
+        setState(() => _pendingImagePath = picked.path);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not get image: $e')),
+        );
+      }
+    }
   }
 
   void _scrollToBottom() {
@@ -331,10 +393,17 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
         ),
         const Divider(height: 1),
+        if (_pendingImagePath != null) _pendingImagePreview(),
         Padding(
           padding: const EdgeInsets.all(8),
           child: Row(
             children: [
+              if (_visionActive)
+                IconButton(
+                  tooltip: 'Attach a photo',
+                  onPressed: _generating ? null : _attachImage,
+                  icon: const Icon(Icons.add_photo_alternate_outlined),
+                ),
               Expanded(
                 child: TextField(
                   controller: _input,
@@ -342,9 +411,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   maxLines: 4,
                   textInputAction: TextInputAction.send,
                   onSubmitted: (_) => _send(),
-                  decoration: const InputDecoration(
-                    hintText: 'Message',
-                    border: OutlineInputBorder(),
+                  decoration: InputDecoration(
+                    hintText: _visionActive ? 'Message or ask about a photo' : 'Message',
+                    border: const OutlineInputBorder(),
                   ),
                 ),
               ),
@@ -366,6 +435,32 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _pendingImagePreview() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.file(
+              File(_pendingImagePath!),
+              width: 56,
+              height: 56,
+              fit: BoxFit.cover,
+            ),
+          ),
+          const SizedBox(width: 8),
+          const Expanded(child: Text('Photo attached')),
+          IconButton(
+            tooltip: 'Remove photo',
+            icon: const Icon(Icons.close),
+            onPressed: () => setState(() => _pendingImagePath = null),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _bubble(ChatMessage m) {
     final isUser = m.role == 'user';
     final scheme = Theme.of(context).colorScheme;
@@ -379,12 +474,29 @@ class _ChatScreenState extends State<ChatScreen> {
         color: isUser ? scheme.primaryContainer : scheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(16),
       ),
-      // User text is shown verbatim; assistant replies are rendered as
-      // markdown (bold, italics, lists, code, …).
-      child: m.text.isEmpty
-          ? const Text('…')
-          : isUser
-              ? Text(m.text)
+      // User text is shown verbatim (with any attached photo above it);
+      // assistant replies are rendered as markdown (bold, italics, lists, …).
+      child: isUser
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (m.imagePath != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: Image.file(
+                        File(m.imagePath!),
+                        width: 180,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  ),
+                if (m.text.isNotEmpty) Text(m.text),
+              ],
+            )
+          : m.text.isEmpty
+              ? const Text('…')
               : MarkdownBody(
                   data: m.text,
                   shrinkWrap: true,

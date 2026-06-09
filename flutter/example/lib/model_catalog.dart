@@ -14,6 +14,7 @@ class ModelSpec {
     this.asset,
     this.url,
     this.localPath,
+    this.isVision = false,
   }) : assert(asset != null || url != null || localPath != null,
             'a model must come from an asset, a URL, or a local path');
 
@@ -32,17 +33,27 @@ class ModelSpec {
   /// Absolute path to an already-extracted model directory (sideloaded).
   final String? localPath;
 
+  /// Whether this is a vision-language model that can answer questions about
+  /// images. When true, the chat exposes a camera/gallery attach button.
+  final bool isVision;
+
   bool get isBundled => asset != null;
   bool get isSideloaded => localPath != null;
 
-  Map<String, dynamic> toJson() =>
-      {'id': id, 'name': name, 'sizeLabel': sizeLabel, 'localPath': localPath};
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'sizeLabel': sizeLabel,
+        'localPath': localPath,
+        'isVision': isVision,
+      };
 
   static ModelSpec fromJson(Map<String, dynamic> j) => ModelSpec(
         id: j['id'] as String,
         name: j['name'] as String,
         sizeLabel: j['sizeLabel'] as String,
         localPath: j['localPath'] as String?,
+        isVision: j['isVision'] as bool? ?? false,
       );
 }
 
@@ -60,6 +71,20 @@ const List<ModelSpec> kBuiltinCatalog = [
     name: 'Qwen3 1.7B',
     sizeLabel: '~1.1 GB download',
     url: 'https://github.com/maxbrito500/cactus/releases/latest/download/qwen3-1.7b-int4-bundle.zip',
+  ),
+  ModelSpec(
+    id: 'lfm2-vl-450m-int4',
+    name: 'LFM2-VL 450M · vision',
+    sizeLabel: '~0.4 GB download · sees images',
+    url: 'https://github.com/maxbrito500/cactus/releases/latest/download/lfm2-vl-450m-int4-bundle.zip',
+    isVision: true,
+  ),
+  ModelSpec(
+    id: 'lfm2.5-vl-1.6b-int4',
+    name: 'LFM2.5-VL 1.6B · vision',
+    sizeLabel: '~1.2 GB download · sees images, stronger',
+    url: 'https://github.com/maxbrito500/cactus/releases/latest/download/lfm2.5-vl-1.6b-int4-bundle.zip',
+    isVision: true,
   ),
 ];
 

@@ -53,3 +53,5 @@ ruy
 
 # Eva APK (too large for git; fetched from the release)
 binary/*.apk
+
+.bgvenv/
