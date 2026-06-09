@@ -218,9 +218,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
               child: Text(_error!, style: const TextStyle(color: Colors.red)),
             ),
-          for (final m in _catalog) _modelTile(m, busy),
           Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
             child: OutlinedButton.icon(
               onPressed: busy ? null : _addFromFolder,
               icon: _scanning
@@ -231,14 +230,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           const Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
             child: Text(
-              'Downloaded models live in the app. You can also point to a folder '
-              '(e.g. an SD card) that already contains extracted Cactus models. '
-              'Larger models are stronger but slower and use more memory.',
+              'Point to a folder (e.g. an SD card) that already contains extracted '
+              'Cactus models, or download one below. Larger models are stronger '
+              'but slower and use more memory.',
               style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ),
+          for (final m in _catalog) _modelTile(m, busy),
+          const SizedBox(height: 8),
           const Divider(),
           _sectionHeader('Voice'),
           _voiceTile(busy),
