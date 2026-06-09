@@ -11,6 +11,7 @@ import 'inference_isolate.dart';
 import 'model_catalog.dart';
 import 'model_manager.dart';
 import 'settings_screen.dart';
+import 'voice_service.dart';
 
 const Color _seedColor = Color(0xFF2E7D32);
 
@@ -72,6 +73,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   final List<ChatMessage> _messages = [];
   final ImagePicker _picker = ImagePicker();
+  final VoiceService _voice = VoiceService();
+  bool _listening = false;
   String _systemPrompt = kDefaultSystemPrompt;
   List<ModelSpec> _catalog = kBuiltinCatalog;
   String _activeModelId = kDefaultModelId;
@@ -96,6 +99,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _input.dispose();
     _scroll.dispose();
+    _voice.dispose();
     super.dispose();
   }
 
@@ -187,6 +191,11 @@ class _ChatScreenState extends State<ChatScreen> {
     // Allow sending an image on its own with a sensible default question.
     if (text.isEmpty && imagePath == null) return;
     if (_generating) return;
+    // Sending finalizes any in-progress dictation.
+    if (_voice.isListening) {
+      await _voice.stop();
+      if (mounted) setState(() => _listening = false);
+    }
     if (text.isEmpty && imagePath != null) text = 'What is in this image?';
     _input.clear();
 
@@ -253,6 +262,83 @@ class _ChatScreenState extends State<ChatScreen> {
       _lastStats = null;
       _pendingImagePath = null;
     });
+  }
+
+  /// Toggles voice input. Starts/stops the streaming recognizer, feeding the
+  /// live transcript into the message field. On first use it downloads the
+  /// (offline) speech model.
+  Future<void> _toggleVoice() async {
+    if (_voice.isListening) {
+      await _voice.stop();
+      if (mounted) setState(() => _listening = false);
+      return;
+    }
+    if (!await _ensureVoiceModel()) return;
+    try {
+      await _voice.start((text) {
+        _input.text = text;
+        _input.selection = TextSelection.collapsed(offset: text.length);
+      });
+      if (mounted) setState(() => _listening = true);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Voice unavailable: $e')),
+        );
+      }
+    }
+  }
+
+  /// Ensures the speech model is present, showing a progress dialog while it
+  /// downloads on first use. Returns true if the model is ready.
+  Future<bool> _ensureVoiceModel() async {
+    if (await _voice.isModelInstalled()) return true;
+    if (!mounted) return false;
+    double? progress;
+    String phase = 'Preparing…';
+    StateSetter? setDlg;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => StatefulBuilder(
+        builder: (c, setState) {
+          setDlg = setState;
+          return AlertDialog(
+            title: const Text('Setting up voice'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(phase),
+                const SizedBox(height: 12),
+                LinearProgressIndicator(value: progress),
+                if (progress != null) ...[
+                  const SizedBox(height: 6),
+                  Text('${(progress! * 100).toStringAsFixed(0)}%'),
+                ],
+              ],
+            ),
+          );
+        },
+      ),
+    );
+    var ok = false;
+    try {
+      await _voice.ensureModel((ph, p) {
+        phase = ph;
+        progress = p;
+        setDlg?.call(() {});
+      });
+      await _voice.load();
+      ok = true;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Voice setup failed: $e')),
+        );
+      }
+    }
+    if (mounted) Navigator.of(context).pop(); // close the progress dialog
+    return ok;
   }
 
   /// Lets the user attach a photo (camera or gallery) to the next message.
@@ -404,6 +490,12 @@ class _ChatScreenState extends State<ChatScreen> {
                   onPressed: _generating ? null : _attachImage,
                   icon: const Icon(Icons.add_photo_alternate_outlined),
                 ),
+              IconButton(
+                tooltip: _listening ? 'Stop listening' : 'Speak',
+                onPressed: _generating ? null : _toggleVoice,
+                color: _listening ? Theme.of(context).colorScheme.error : null,
+                icon: Icon(_listening ? Icons.mic : Icons.mic_none),
+              ),
               Expanded(
                 child: TextField(
                   controller: _input,

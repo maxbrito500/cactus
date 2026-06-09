@@ -23,7 +23,8 @@ android {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.cactuscompute.cactus_example"
         // libcactus.so is built only for arm64-v8a, so restrict the APK to that ABI.
-        minSdk = flutter.minSdkVersion
+        // The `record` mic plugin requires API 23+, so floor minSdk at 23.
+        minSdk = maxOf(23, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
