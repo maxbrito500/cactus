@@ -5,6 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'app_prefs.dart';
 import 'model_catalog.dart';
 import 'model_manager.dart';
+import 'voice_service.dart';
 
 /// Lets the user edit the assistant persona, download/select models, and
 /// sideload models from a folder. Pops with the selected model id when the user
@@ -26,11 +27,15 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _prompt = TextEditingController();
+  final VoiceService _voice = VoiceService();
   List<ModelSpec> _catalog = const [];
   final Set<String> _installed = {};
   String? _downloadingId;
   double? _downloadProgress;
   bool _scanning = false;
+  bool _voiceInstalled = false;
+  bool _voiceDownloading = false;
+  double? _voiceProgress;
   String? _error;
 
   @override
@@ -42,13 +47,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void dispose() {
     _prompt.dispose();
+    _voice.dispose();
     super.dispose();
   }
 
   Future<void> _load() async {
     _prompt.text = await loadSystemPrompt();
     _catalog = await loadCatalog();
+    _voiceInstalled = await _voice.isModelInstalled();
     await _refreshInstalled();
+  }
+
+  Future<void> _downloadVoice() async {
+    setState(() {
+      _voiceDownloading = true;
+      _voiceProgress = null;
+      _error = null;
+    });
+    try {
+      await _voice.ensureModel((phase, progress) {
+        if (mounted) setState(() => _voiceProgress = progress);
+      });
+      _voiceInstalled = true;
+    } catch (e) {
+      setState(() => _error = 'Voice download failed: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _voiceDownloading = false;
+          _voiceProgress = null;
+        });
+      }
+    }
   }
 
   Future<void> _refreshInstalled() async {
@@ -130,7 +160,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final busy = _downloadingId != null || _scanning;
+    final busy = _downloadingId != null || _scanning || _voiceDownloading;
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(
@@ -209,8 +239,59 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ),
+          const Divider(),
+          _sectionHeader('Voice'),
+          _voiceTile(busy),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Text(
+              'Talk to Eva with offline speech-to-text. Tap the microphone in the '
+              'chat to dictate; the speech model is downloaded once and works '
+              'fully offline afterwards.',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  Widget _voiceTile(bool busy) {
+    Widget trailing;
+    if (_voiceDownloading) {
+      trailing = SizedBox(
+        width: 120,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            LinearProgressIndicator(value: _voiceProgress),
+            const SizedBox(height: 4),
+            Text(
+              _voiceProgress == null
+                  ? 'Working…'
+                  : '${(_voiceProgress! * 100).toStringAsFixed(0)}%',
+              style: const TextStyle(fontSize: 11),
+            ),
+          ],
+        ),
+      );
+    } else if (_voiceInstalled) {
+      trailing = const Chip(
+        avatar: Icon(Icons.check, size: 18),
+        label: Text('Installed'),
+      );
+    } else {
+      trailing = OutlinedButton.icon(
+        onPressed: busy ? null : _downloadVoice,
+        icon: const Icon(Icons.download, size: 18),
+        label: const Text('Download'),
+      );
+    }
+    return ListTile(
+      leading: const Icon(Icons.mic_none),
+      title: const Text('English speech-to-text'),
+      subtitle: const Text('~57 MB download · offline dictation'),
+      trailing: trailing,
     );
   }
 
