@@ -228,17 +228,8 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch model bundle from release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          mkdir -p flutter/example/assets
-          gh release download "$TAG" \
-            -p 'lfm2.5-350m-int4-bundle.zip' \
-            -O flutter/example/assets/model.zip
-          ls -lh flutter/example/assets/model.zip
+      # No model is bundled into the APK — the app downloads models (including
+      # the default) from the GitHub release on demand to keep the APK small.
 
       - name: Build APK
         working-directory: flutter/example

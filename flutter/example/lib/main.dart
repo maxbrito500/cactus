@@ -109,8 +109,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _catalog = await loadCatalog();
     final prefs = await SharedPreferences.getInstance();
     _activeModelId = prefs.getString('selected_model') ?? kDefaultModelId;
-    // A previously-selected non-bundled model may be gone; if so, fall back to
-    // the bundled default (which is always available).
+    // A previously-selected model may be gone; if so, fall back to the default
+    // (downloaded automatically on first use by _prepareAndLoad below).
     final spec = modelById(_catalog, _activeModelId);
     if (!spec.isBundled && !await _models.isInstalled(spec)) {
       _activeModelId = kDefaultModelId;

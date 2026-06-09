@@ -57,14 +57,14 @@ class ModelSpec {
       );
 }
 
-/// Built-in models. The default is embedded in the APK so the app works offline
-/// out of the box; larger models are downloaded from the GitHub release.
+/// Built-in models. All are downloaded from the GitHub release on demand to
+/// keep the APK small; the default is fetched automatically on first launch.
 const List<ModelSpec> kBuiltinCatalog = [
   ModelSpec(
     id: 'lfm2.5-350m-int4',
     name: 'LFM2.5 350M (default)',
-    sizeLabel: 'bundled',
-    asset: 'assets/model.zip',
+    sizeLabel: '~0.2 GB download',
+    url: 'https://github.com/maxbrito500/cactus/releases/latest/download/lfm2.5-350m-int4-bundle.zip',
   ),
   ModelSpec(
     id: 'qwen3-1.7b-int4',

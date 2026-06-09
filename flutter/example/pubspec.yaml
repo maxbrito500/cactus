@@ -75,11 +75,9 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # The transpiled model bundle, shipped inside the APK and unpacked on first
-  # launch. Produced by tools/build_model_asset.sh (gitignored — too large to
-  # commit; CI fetches it from the GitHub release before building).
+  # Models are downloaded from the GitHub release on demand (keeps the APK
+  # small), so no model bundle is shipped inside the APK — only Eva's avatar.
   assets:
-    - assets/model.zip
     - assets/eva.png
 
   # An image asset can refer to one or more resolution-specific "variants", see
