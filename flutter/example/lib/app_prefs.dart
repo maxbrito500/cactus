@@ -84,3 +84,20 @@ Future<void> saveVoiceLocale(String localeId) async {
   final prefs = await SharedPreferences.getInstance();
   await prefs.setString(_kVoiceLocaleKey, localeId);
 }
+
+// ── Document corpus location ─────────────────────────────────────────────────
+
+const String _kCorpusLocationKey = 'corpus_location';
+
+/// Absolute path of the folder holding the document corpus + index. Empty means
+/// the app's default documents directory. A user can point this at an SD card
+/// so the indexed archive survives a reinstall.
+Future<String> loadCorpusLocation() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getString(_kCorpusLocationKey) ?? '';
+}
+
+Future<void> saveCorpusLocation(String path) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString(_kCorpusLocationKey, path);
+}

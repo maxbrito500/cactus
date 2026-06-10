@@ -86,6 +86,7 @@ class _ChatScreenState extends State<ChatScreen> {
   VoiceEngine _voiceEngine = VoiceEngine.fast;
   String _voiceLocale = '';
   List<DocumentInfo> _documents = const [];
+  String _corpusLocation = '';
   bool _embedderReady = false;
   bool _docBusy = false;
   String _systemPrompt = kDefaultSystemPrompt;
@@ -122,6 +123,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _systemPrompt = await loadSystemPrompt();
     _voiceEngine = await loadVoiceEngine();
     _voiceLocale = await loadVoiceLocale();
+    _corpusLocation = await loadCorpusLocation();
     _documents = await _docs.list();
     _catalog = await loadCatalog();
     final prefs = await SharedPreferences.getInstance();
@@ -173,9 +175,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _voiceEngine = await loadVoiceEngine();
     _voiceLocale = await loadVoiceLocale();
     final docsBefore = _documents.map((d) => d.id).toSet();
+    final locBefore = _corpusLocation;
+    _corpusLocation = await loadCorpusLocation();
     _documents = await _docs.list();
-    // Documents removed in Settings invalidate the loaded index.
-    if (!_documents.map((d) => d.id).toSet().containsAll(docsBefore) ||
+    // A changed corpus location, or documents removed in Settings, invalidate
+    // the loaded index — force a rebuild/reopen on the next question.
+    if (_corpusLocation != locBefore ||
+        !_documents.map((d) => d.id).toSet().containsAll(docsBefore) ||
         _documents.length != docsBefore.length) {
       _embedderReady = false;
     }

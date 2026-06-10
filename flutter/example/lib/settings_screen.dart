@@ -34,6 +34,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final SystemVoiceService _systemVoice = SystemVoiceService();
   final DocumentService _docs = DocumentService();
   List<DocumentInfo> _documents = const [];
+  String _corpusLocation = 'App storage (default)';
   List<ModelSpec> _catalog = const [];
   final Set<String> _installed = {};
   String? _downloadingId;
@@ -69,9 +70,120 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _voiceEngine = await loadVoiceEngine();
     _voiceLocale = await loadVoiceLocale();
     _documents = await _docs.list();
+    _corpusLocation = await _docs.locationLabel();
     await _refreshInstalled();
     if (_voiceEngine == VoiceEngine.system) _loadLocales();
   }
+
+  Future<void> _refreshDocs() async {
+    _documents = await _docs.list();
+    _corpusLocation = await _docs.locationLabel();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _toast(String msg) async {
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
+  /// Lets the user choose a folder (e.g. SD card) for the corpus, reusing an
+  /// existing archive there or offering to move the current documents into it.
+  Future<void> _chooseLocation() async {
+    var status = await Permission.manageExternalStorage.status;
+    if (!status.isGranted) {
+      status = await Permission.manageExternalStorage.request();
+    }
+    if (!status.isGranted) {
+      await _toast('Storage permission is required to use a custom folder.');
+      return;
+    }
+    final dir = await FilePicker.platform.getDirectoryPath();
+    if (dir == null) return;
+
+    // Peek at any existing pack in the target folder (without switching to it).
+    final hadDocs = _documents.isNotEmpty;
+    final targetManifest = await _docs.readManifestAt(dir);
+    final reason = await _docs.incompatibilityReasonAt(dir);
+
+    if (targetManifest != null) {
+      // Folder already holds an archive.
+      if (reason != null) {
+        final useAnyway = await _confirm('Incompatible archive', reason);
+        if (useAnyway != true) return;
+      }
+      await _docs.useLocation(dir);
+      await _refreshDocs();
+      await _toast('Using archive at this folder '
+          '(${targetManifest['documentCount'] ?? '?'} documents).');
+      return;
+    }
+
+    // Empty target folder.
+    if (hadDocs) {
+      final move = await _confirmThreeWay(
+        'Use this folder',
+        'Move your $_docsCountLabel into this folder, or start a fresh, '
+            'empty archive here?',
+      );
+      if (move == null) return;
+      if (move) {
+        await _docs.moveCorpusTo(dir);
+      } else {
+        await _docs.useLocation(dir);
+      }
+    } else {
+      await _docs.useLocation(dir);
+    }
+    await _refreshDocs();
+    await _toast('Documents are now stored at this folder.');
+  }
+
+  String get _docsCountLabel =>
+      '${_documents.length} document${_documents.length == 1 ? '' : 's'}';
+
+  Future<void> _useDefaultLocation() async {
+    await _docs.useDefaultLocation();
+    await _refreshDocs();
+    await _toast('Using app default storage.');
+  }
+
+  Future<bool?> _confirm(String title, String body) => showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: Text(title),
+          content: Text(body),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(c, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(c, true),
+                child: const Text('Use anyway')),
+          ],
+        ),
+      );
+
+  // Returns true = move, false = fresh, null = cancel.
+  Future<bool?> _confirmThreeWay(String title, String body) => showDialog<bool?>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: Text(title),
+          content: Text(body),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(c, null),
+                child: const Text('Cancel')),
+            TextButton(
+                onPressed: () => Navigator.pop(c, false),
+                child: const Text('Start fresh')),
+            FilledButton(
+                onPressed: () => Navigator.pop(c, true),
+                child: const Text('Move here')),
+          ],
+        ),
+      );
 
   Future<void> _removeDocument(DocumentInfo doc) async {
     await _docs.remove(doc.id);
@@ -346,12 +458,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onPressed: () => _removeDocument(d),
                 ),
               ),
+          ListTile(
+            leading: const Icon(Icons.sd_storage_outlined),
+            title: const Text('Storage location'),
+            subtitle: Text(_corpusLocation),
+            isThreeLine: _corpusLocation.length > 30,
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+            child: Wrap(
+              spacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: busy ? null : _chooseLocation,
+                  icon: const Icon(Icons.folder_open, size: 18),
+                  label: const Text('Choose folder…'),
+                ),
+                if (_corpusLocation != 'App storage (default)')
+                  TextButton(
+                    onPressed: busy ? null : _useDefaultLocation,
+                    child: const Text('Use app default'),
+                  ),
+              ],
+            ),
+          ),
           const Padding(
-            padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+            padding: EdgeInsets.fromLTRB(16, 8, 16, 16),
             child: Text(
               'Add PDFs or text files from the chat (paperclip icon) to ask Eva '
-              'about them. Search runs fully offline; removing a document '
-              're-indexes the rest.',
+              'about them. Search runs fully offline. Point the storage at an SD '
+              'card to keep the indexed archive — it can be reused after '
+              'reinstalling the app.',
               style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ),
