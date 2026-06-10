@@ -59,6 +59,10 @@ dependencies:
   syncfusion_flutter_pdf: ^27.1.48
   # C-pointer helpers for the usearch (ANN vector index) FFI bindings.
   ffi: ^2.1.0
+  # SQLite (catalog + FTS5 keyword index) for document retrieval; the _libs
+  # package bundles a recent SQLite with FTS5 on Android.
+  sqlite3: ^2.4.0
+  sqlite3_flutter_libs: ^0.5.24
 
 dev_dependencies:
   flutter_test:

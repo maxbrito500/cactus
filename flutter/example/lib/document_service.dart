@@ -181,6 +181,12 @@ class DocumentService {
 
   Future<bool> get hasDocuments async => (await list()).isNotEmpty;
 
+  /// Reads back the extracted plain text for a document (for indexing).
+  Future<String> readText(String id) async {
+    final f = File('${await corpusPath()}/$id.txt');
+    return await f.exists() ? f.readAsString() : '';
+  }
+
   Future<void> _saveList(List<DocumentInfo> docs) async {
     final f = await _metaFile();
     await f.writeAsString(jsonEncode(docs.map((d) => d.toJson()).toList()));

@@ -13,6 +13,7 @@ import 'document_service.dart';
 import 'inference_isolate.dart';
 import 'model_catalog.dart';
 import 'model_manager.dart';
+import 'rag_index.dart';
 import 'settings_screen.dart';
 import 'system_voice.dart';
 import 'voice_service.dart';
@@ -87,6 +88,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String _voiceLocale = '';
   List<DocumentInfo> _documents = const [];
   String _corpusLocation = '';
+  RagIndex? _rag;
   bool _embedderReady = false;
   bool _docBusy = false;
   String _systemPrompt = kDefaultSystemPrompt;
@@ -115,6 +117,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _scroll.dispose();
     _voice.dispose();
     _systemVoice.dispose();
+    _rag?.close();
     super.dispose();
   }
 
@@ -178,12 +181,22 @@ class _ChatScreenState extends State<ChatScreen> {
     final locBefore = _corpusLocation;
     _corpusLocation = await loadCorpusLocation();
     _documents = await _docs.list();
-    // A changed corpus location, or documents removed in Settings, invalidate
-    // the loaded index — force a rebuild/reopen on the next question.
-    if (_corpusLocation != locBefore ||
-        !_documents.map((d) => d.id).toSet().containsAll(docsBefore) ||
-        _documents.length != docsBefore.length) {
+    final docsNow = _documents.map((d) => d.id).toSet();
+    // A changed corpus location closes the current index (it lives in the pack).
+    if (_corpusLocation != locBefore) {
+      _rag?.close();
+      _rag = null;
       _embedderReady = false;
+    }
+    // Documents removed in Settings must be dropped from the index too.
+    final removed = docsBefore.difference(docsNow);
+    if (removed.isNotEmpty) {
+      try {
+        _rag ??= await RagIndex.open(await _docs.corpusPath());
+        for (final id in removed) {
+          _rag!.removeDocument(id);
+        }
+      } catch (_) {/* index will reconcile on next open */}
     }
     _catalog = await loadCatalog();
     if (newId == null || newId == _activeModelId) {
@@ -248,24 +261,22 @@ class _ChatScreenState extends State<ChatScreen> {
     List<String>? sources;
     if (_documents.isNotEmpty) {
       try {
-        await _ensureCorpus();
-        final ragJson = await _engine.ragQuery(text, topK: 4);
-        final parsed = jsonDecode(ragJson) as Map<String, dynamic>;
-        final chunks = (parsed['chunks'] as List?) ?? const [];
-        if (chunks.isNotEmpty) {
+        await _ensureRag();
+        final qvec = (await _engine.embedBatch([text])).first;
+        final hits = await _rag!
+            .query(queryVec: qvec, queryText: text, topK: 4);
+        if (hits.isNotEmpty) {
           final buf = StringBuffer(_systemPrompt);
           buf.writeln(
               "\n\nAnswer the user's question using ONLY the document excerpts below. "
               'Cite the source document (and page if shown). If the answer is not '
               'in them, say you could not find it in the documents.\n');
           final cited = <String>{};
-          for (final c in chunks) {
-            final map = c as Map<String, dynamic>;
-            final name = _docName(map['source'] as String?);
-            final content = (map['content'] as String?)?.trim() ?? '';
-            buf.writeln('\n--- Source: $name ---');
-            buf.writeln(content);
-            cited.add(_citationLabel(name, content));
+          for (final h in hits) {
+            buf.writeln('\n--- Source: ${h.docName}'
+                '${h.page != null ? ' (page ${h.page})' : ''} ---');
+            buf.writeln(h.text.trim());
+            cited.add(h.page != null ? '${h.docName} (p.${h.page})' : h.docName);
           }
           systemContent = buf.toString();
           sources = cited.toList();
@@ -346,10 +357,18 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _docBusy = true);
     try {
       final info = await _docs.addFile(path);
-      await _docs.invalidateIndex();
       _documents = await _docs.list();
-      _embedderReady = false; // force a rebuild including the new document
-      await _ensureCorpus();
+      await _ensureRag();
+      final text = await _docs.readText(info.id);
+      await _withProgressDialog('Indexing "${info.name}"', (update) async {
+        await _rag!.addDocument(
+          docId: info.id,
+          name: info.name,
+          fullText: text,
+          embed: _engine.embedBatch,
+          onProgress: (p) => update('Indexing…', p),
+        );
+      });
       if (mounted) {
         setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
@@ -368,15 +387,18 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Ensures the embedding model is downloaded and the corpus index is built.
-  /// Shows a progress dialog (download can be ~200 MB the first time).
-  Future<void> _ensureCorpus() async {
-    if (_embedderReady) return;
+  /// Ensures the embedding model is downloaded + loaded and the RAG index for
+  /// the current corpus location is open. Shows a progress dialog (the embedder
+  /// download is ~200 MB the first time).
+  Future<void> _ensureRag() async {
+    if (_embedderReady && _rag != null) return;
     await _withProgressDialog('Setting up document search', (update) async {
       final dir = await _models.ensureInstalled(
           kEmbedderModel, (phase, p) => update(phase, p));
-      update('Indexing documents…', null);
-      await _engine.initCorpus(dir, await _docs.corpusPath());
+      update('Loading…', null);
+      await _engine.loadEmbedder(dir);
+      _rag?.close();
+      _rag = await RagIndex.open(await _docs.corpusPath());
       _embedderReady = true;
     });
   }
@@ -405,19 +427,6 @@ class _ChatScreenState extends State<ChatScreen> {
       _lastStats = null;
     });
     await _prepareAndLoad();
-  }
-
-  String _docName(String? source) {
-    if (source == null || source.isEmpty) return 'document';
-    var s = source.split('/').last;
-    if (s.toLowerCase().endsWith('.txt')) s = s.substring(0, s.length - 4);
-    final match = _documents.where((d) => d.id == s);
-    return match.isNotEmpty ? match.first.name : source.split('/').last;
-  }
-
-  String _citationLabel(String name, String content) {
-    final m = RegExp(r'\[Page (\d+)\]').firstMatch(content);
-    return m != null ? '$name (p.${m.group(1)})' : name;
   }
 
   /// Runs [work] while showing a modal progress dialog. [work] gets an updater

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'cactus.dart' as cactus;
 
@@ -17,8 +18,8 @@ class InferenceEngine {
 
   Completer<void>? _initCompleter;
   Completer<void>? _resetCompleter;
-  Completer<void>? _corpusCompleter;
-  Completer<String>? _ragCompleter;
+  Completer<void>? _embedderCompleter;
+  Completer<List<Float32List>>? _embedCompleter;
   StreamController<String>? _tokenController;
   Completer<Map<String, dynamic>>? _doneCompleter;
 
@@ -50,21 +51,22 @@ class InferenceEngine {
         _resetCompleter?.complete();
         _resetCompleter = null;
         break;
-      case 'corpus_done':
-        _corpusCompleter?.complete();
-        _corpusCompleter = null;
+      case 'embedder_done':
+        _embedderCompleter?.complete();
+        _embedderCompleter = null;
         break;
-      case 'corpus_error':
-        _corpusCompleter?.completeError(Exception(m['message']));
-        _corpusCompleter = null;
+      case 'embedder_error':
+        _embedderCompleter?.completeError(Exception(m['message']));
+        _embedderCompleter = null;
         break;
-      case 'rag_result':
-        _ragCompleter?.complete(m['result'] as String);
-        _ragCompleter = null;
+      case 'embed_result':
+        _embedCompleter?.complete(
+            (m['vectors'] as List).cast<Float32List>());
+        _embedCompleter = null;
         break;
-      case 'rag_error':
-        _ragCompleter?.completeError(Exception(m['message']));
-        _ragCompleter = null;
+      case 'embed_error':
+        _embedCompleter?.completeError(Exception(m['message']));
+        _embedCompleter = null;
         break;
       case 'token':
         _tokenController?.add(m['text'] as String);
@@ -105,33 +107,28 @@ class InferenceEngine {
     return _resetCompleter!.future;
   }
 
-  /// Loads the embedding model from [embedderDir] and builds/loads the hybrid
-  /// retrieval index over the `.txt`/`.md` files in [corpusDir]. Held alongside
-  /// the chat model. Call again to rebuild after documents change.
-  Future<void> initCorpus(String embedderDir, String corpusDir) {
-    _corpusCompleter = Completer<void>();
-    _toWorker.send({
-      'cmd': 'init_corpus',
-      'embedderDir': embedderDir,
-      'corpusDir': corpusDir,
-    });
-    return _corpusCompleter!.future;
+  /// Loads the embedding model from [embedderDir] alongside the chat model, for
+  /// computing document/query embeddings (RAG). No corpus is built here — the
+  /// vector index is managed app-side via usearch.
+  Future<void> loadEmbedder(String embedderDir) {
+    _embedderCompleter = Completer<void>();
+    _toWorker.send({'cmd': 'load_embedder', 'embedderDir': embedderDir});
+    return _embedderCompleter!.future;
   }
 
-  /// Frees the embedding model and its index (e.g. when no documents remain).
+  /// Frees the embedding model (e.g. when no documents remain).
   Future<void> freeEmbedder() {
-    _corpusCompleter = Completer<void>();
+    _embedderCompleter = Completer<void>();
     _toWorker.send({'cmd': 'free_embedder'});
-    return _corpusCompleter!.future;
+    return _embedderCompleter!.future;
   }
 
-  /// Retrieves the top-[topK] document passages for [query] using the engine's
-  /// hybrid (embedding + BM25) RAG. Returns the raw JSON
-  /// (`{"chunks":[{"score","source","content"}]}`).
-  Future<String> ragQuery(String query, {int topK = 4}) {
-    _ragCompleter = Completer<String>();
-    _toWorker.send({'cmd': 'rag_query', 'query': query, 'topK': topK});
-    return _ragCompleter!.future;
+  /// Embeds each text in [texts] with the loaded embedder, returning a unit-norm
+  /// vector per text (in order).
+  Future<List<Float32List>> embedBatch(List<String> texts) {
+    _embedCompleter = Completer<List<Float32List>>();
+    _toWorker.send({'cmd': 'embed_batch', 'texts': texts});
+    return _embedCompleter!.future;
   }
 
   /// Runs a chat completion. [messagesJson] is a JSON array of
@@ -185,20 +182,15 @@ void _workerMain(SendPort toMain) {
           if (handle != null) cactus.cactusReset(handle);
           toMain.send({'type': 'reset_done'});
           break;
-        case 'init_corpus':
-          // (Re)load the embedder and build/load the hybrid index over the
-          // corpus directory. cacheIndex=true persists index.bin across launches.
+        case 'load_embedder':
+          // Load the embedding model (no corpus — the vector index is app-side).
           final existing = embedder;
           if (existing != null) {
             cactus.cactusDestroy(existing);
             embedder = null;
           }
-          embedder = cactus.cactusInit(
-            m['embedderDir'] as String,
-            m['corpusDir'] as String,
-            true,
-          );
-          toMain.send({'type': 'corpus_done'});
+          embedder = cactus.cactusInit(m['embedderDir'] as String, null, false);
+          toMain.send({'type': 'embedder_done'});
           break;
         case 'free_embedder':
           final handle = embedder;
@@ -206,20 +198,19 @@ void _workerMain(SendPort toMain) {
             cactus.cactusDestroy(handle);
             embedder = null;
           }
-          toMain.send({'type': 'corpus_done'});
+          toMain.send({'type': 'embedder_done'});
           break;
-        case 'rag_query':
+        case 'embed_batch':
           final handle = embedder;
           if (handle == null) {
-            toMain.send({'type': 'rag_error', 'message': 'Corpus not initialized'});
+            toMain.send({'type': 'embed_error', 'message': 'Embedder not loaded'});
             break;
           }
-          final ragResult = cactus.cactusRagQuery(
-            handle,
-            m['query'] as String,
-            m['topK'] as int,
-          );
-          toMain.send({'type': 'rag_result', 'result': ragResult});
+          final texts = (m['texts'] as List).cast<String>();
+          final vectors = <Float32List>[
+            for (final t in texts) cactus.cactusEmbed(handle, t, true)
+          ];
+          toMain.send({'type': 'embed_result', 'vectors': vectors});
           break;
         case 'complete':
           final handle = model;
@@ -246,8 +237,8 @@ void _workerMain(SendPort toMain) {
     } catch (e) {
       final errorType = switch (cmd) {
         'init' => 'init_error',
-        'init_corpus' || 'free_embedder' => 'corpus_error',
-        'rag_query' => 'rag_error',
+        'load_embedder' || 'free_embedder' => 'embedder_error',
+        'embed_batch' => 'embed_error',
         _ => 'complete_error',
       };
       toMain.send({'type': errorType, 'message': e.toString()});
