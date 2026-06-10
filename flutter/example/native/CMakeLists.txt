@@ -35,8 +35,15 @@ endif()
 # Note: the `cactus` name is taken by a utility target from cactus/CMakeLists.txt,
 # so the shared-library target is `cactus_ffi` with output name `cactus`
 # (-> libcactus.so).
-file(WRITE ${CMAKE_BINARY_DIR}/stub.cpp "")
-add_library(cactus_ffi SHARED ${CMAKE_BINARY_DIR}/stub.cpp)
+# usearch (HNSW ANN) C binding, compiled directly into the shared lib so its
+# extern "C" symbols (usearch_*) are exported for Dart FFI. Header-only C++ core.
+set(USEARCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/usearch)
+add_library(cactus_ffi SHARED
+    ${CMAKE_BINARY_DIR}/stub.cpp
+    ${USEARCH_DIR}/lib.cpp
+)
+target_include_directories(cactus_ffi PRIVATE ${USEARCH_DIR} ${USEARCH_DIR}/include)
+target_compile_definitions(cactus_ffi PRIVATE USEARCH_USE_SIMSIMD=0 USEARCH_USE_FP16LIB=0)
 set_target_properties(cactus_ffi PROPERTIES
     OUTPUT_NAME cactus
     CXX_STANDARD 20

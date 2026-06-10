@@ -57,6 +57,8 @@ dependencies:
   speech_to_text: ^7.0.0
   # Extract text from PDFs offline (pure Dart) for document Q&A (RAG).
   syncfusion_flutter_pdf: ^27.1.48
+  # C-pointer helpers for the usearch (ANN vector index) FFI bindings.
+  ffi: ^2.1.0
 
 dev_dependencies:
   flutter_test:
