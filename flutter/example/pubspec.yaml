@@ -55,6 +55,8 @@ dependencies:
   # Optional: the phone's built-in recognizer for many languages (incl. the
   # system language), as an alternative to the bundled English model.
   speech_to_text: ^7.0.0
+  # Extract text from PDFs offline (pure Dart) for document Q&A (RAG).
+  syncfusion_flutter_pdf: ^27.1.48
 
 dev_dependencies:
   flutter_test:

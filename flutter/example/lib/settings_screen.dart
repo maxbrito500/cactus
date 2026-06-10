@@ -4,6 +4,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import 'app_prefs.dart';
+import 'document_service.dart';
 import 'model_catalog.dart';
 import 'model_manager.dart';
 import 'system_voice.dart';
@@ -31,6 +32,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _prompt = TextEditingController();
   final VoiceService _voice = VoiceService();
   final SystemVoiceService _systemVoice = SystemVoiceService();
+  final DocumentService _docs = DocumentService();
+  List<DocumentInfo> _documents = const [];
   List<ModelSpec> _catalog = const [];
   final Set<String> _installed = {};
   String? _downloadingId;
@@ -65,8 +68,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _voiceInstalled = await _voice.isModelInstalled();
     _voiceEngine = await loadVoiceEngine();
     _voiceLocale = await loadVoiceLocale();
+    _documents = await _docs.list();
     await _refreshInstalled();
     if (_voiceEngine == VoiceEngine.system) _loadLocales();
+  }
+
+  Future<void> _removeDocument(DocumentInfo doc) async {
+    await _docs.remove(doc.id);
+    _documents = await _docs.list();
+    if (mounted) setState(() {});
   }
 
   /// Loads the device's available recognition locales (for the system engine).
@@ -316,6 +326,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ],
+          const Divider(),
+          _sectionHeader('Documents'),
+          if (_documents.isEmpty)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text('No documents added yet.',
+                  style: TextStyle(color: Colors.grey)),
+            )
+          else
+            for (final d in _documents)
+              ListTile(
+                leading: const Icon(Icons.description_outlined),
+                title: Text(d.name),
+                subtitle: Text('${(d.chars / 1000).toStringAsFixed(1)}k characters'),
+                trailing: IconButton(
+                  tooltip: 'Remove',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () => _removeDocument(d),
+                ),
+              ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Text(
+              'Add PDFs or text files from the chat (paperclip icon) to ask Eva '
+              'about them. Search runs fully offline; removing a document '
+              're-indexes the rest.',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ),
         ],
       ),
     );

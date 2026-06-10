@@ -15,6 +15,7 @@ class ModelSpec {
     this.url,
     this.localPath,
     this.isVision = false,
+    this.isEmbedder = false,
   }) : assert(asset != null || url != null || localPath != null,
             'a model must come from an asset, a URL, or a local path');
 
@@ -36,6 +37,11 @@ class ModelSpec {
   /// Whether this is a vision-language model that can answer questions about
   /// images. When true, the chat exposes a camera/gallery attach button.
   final bool isVision;
+
+  /// Whether this is a text-embedding model used for document retrieval (RAG),
+  /// not for chat. Embedding bundles have a `text_embedding` component instead
+  /// of a decoder, so they validate against a lighter set of files.
+  final bool isEmbedder;
 
   bool get isBundled => asset != null;
   bool get isSideloaded => localPath != null;
@@ -89,6 +95,20 @@ const List<ModelSpec> kBuiltinCatalog = [
 ];
 
 const String kDefaultModelId = 'lfm2.5-350m-int4';
+
+/// The multilingual text-embedding model that powers document retrieval (RAG).
+/// Loaded alongside the chat model only when documents are present. Not shown
+/// in the chat model list.
+const ModelSpec kEmbedderModel = ModelSpec(
+  id: 'nomic-embed-v2-int4',
+  name: 'Document search (nomic-embed v2)',
+  sizeLabel: '~0.2 GB download · multilingual',
+  url: 'https://github.com/maxbrito500/cactus/releases/latest/download/nomic-embed-v2-int4-bundle.zip',
+  isEmbedder: true,
+);
+
+/// Chat model recommended for document Q&A (better synthesis than the default).
+const String kDocQaModelId = 'qwen3-1.7b-int4';
 
 const String _kSideloadKey = 'sideloaded_models';
 

@@ -18,6 +18,13 @@ const List<String> _requiredFiles = [
   'components/manifest.json',
 ];
 
+/// Embedding bundles (text_embedding component, no decoder) carry fewer root
+/// files, so they validate against just the essentials.
+const List<String> _requiredEmbedderFiles = [
+  'config.txt',
+  'components/manifest.json',
+];
+
 /// Reports install progress. [progress] is 0..1 during download, null during
 /// the indeterminate unpack/copy phases.
 typedef ProgressCallback = void Function(String phase, double? progress);
@@ -28,9 +35,9 @@ class ModelManager {
     return Directory('${docs.path}/models/$id');
   }
 
-  Future<bool> _isValid(Directory dir) async {
+  Future<bool> _isValid(Directory dir, {bool embedder = false}) async {
     if (!await dir.exists()) return false;
-    for (final name in _requiredFiles) {
+    for (final name in embedder ? _requiredEmbedderFiles : _requiredFiles) {
       if (!await File('${dir.path}/$name').exists()) return false;
     }
     return true;
@@ -38,8 +45,10 @@ class ModelManager {
 
   /// Whether a usable copy of [spec] is already available.
   Future<bool> isInstalled(ModelSpec spec) async {
-    if (spec.isSideloaded) return _isValid(Directory(spec.localPath!));
-    return _isValid(await _modelDir(spec.id));
+    if (spec.isSideloaded) {
+      return _isValid(Directory(spec.localPath!), embedder: spec.isEmbedder);
+    }
+    return _isValid(await _modelDir(spec.id), embedder: spec.isEmbedder);
   }
 
   /// Ensures [spec] is available, returning its directory. Sideloaded models are
@@ -47,14 +56,14 @@ class ModelManager {
   Future<String> ensureInstalled(ModelSpec spec, ProgressCallback onProgress) async {
     if (spec.isSideloaded) {
       final dir = Directory(spec.localPath!);
-      if (!await _isValid(dir)) {
+      if (!await _isValid(dir, embedder: spec.isEmbedder)) {
         throw Exception('Model folder not found or invalid: ${spec.localPath}');
       }
       return dir.path;
     }
 
     final modelDir = await _modelDir(spec.id);
-    if (await _isValid(modelDir)) return modelDir.path;
+    if (await _isValid(modelDir, embedder: spec.isEmbedder)) return modelDir.path;
 
     final tmp = await getTemporaryDirectory();
     final zipPath = '${tmp.path}/${spec.id}.zip';

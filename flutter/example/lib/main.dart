@@ -6,7 +6,10 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:file_picker/file_picker.dart';
+
 import 'app_prefs.dart';
+import 'document_service.dart';
 import 'inference_isolate.dart';
 import 'model_catalog.dart';
 import 'model_manager.dart';
@@ -52,11 +55,13 @@ class EvaApp extends StatelessWidget {
 enum AppPhase { preparing, downloading, loadingModel, ready, error }
 
 class ChatMessage {
-  ChatMessage(this.role, this.text, {this.imagePath});
+  ChatMessage(this.role, this.text, {this.imagePath, this.sources});
   final String role; // 'user' or 'assistant'
   String text;
   // Absolute path of an image the user attached to this message (vision chat).
   final String? imagePath;
+  // Document sources cited for this answer (RAG), shown under the bubble.
+  List<String>? sources;
 }
 
 class ChatScreen extends StatefulWidget {
@@ -76,9 +81,13 @@ class _ChatScreenState extends State<ChatScreen> {
   final ImagePicker _picker = ImagePicker();
   final VoiceService _voice = VoiceService();
   final SystemVoiceService _systemVoice = SystemVoiceService();
+  final DocumentService _docs = DocumentService();
   bool _listening = false;
   VoiceEngine _voiceEngine = VoiceEngine.fast;
   String _voiceLocale = '';
+  List<DocumentInfo> _documents = const [];
+  bool _embedderReady = false;
+  bool _docBusy = false;
   String _systemPrompt = kDefaultSystemPrompt;
   List<ModelSpec> _catalog = kBuiltinCatalog;
   String _activeModelId = kDefaultModelId;
@@ -113,6 +122,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _systemPrompt = await loadSystemPrompt();
     _voiceEngine = await loadVoiceEngine();
     _voiceLocale = await loadVoiceLocale();
+    _documents = await _docs.list();
     _catalog = await loadCatalog();
     final prefs = await SharedPreferences.getInstance();
     _activeModelId = prefs.getString('selected_model') ?? kDefaultModelId;
@@ -158,10 +168,17 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       ),
     );
-    // Persona, voice settings and sideloaded models may have changed — reload.
+    // Persona, voice settings, documents and sideloaded models may have changed.
     _systemPrompt = await loadSystemPrompt();
     _voiceEngine = await loadVoiceEngine();
     _voiceLocale = await loadVoiceLocale();
+    final docsBefore = _documents.map((d) => d.id).toSet();
+    _documents = await _docs.list();
+    // Documents removed in Settings invalidate the loaded index.
+    if (!_documents.map((d) => d.id).toSet().containsAll(docsBefore) ||
+        _documents.length != docsBefore.length) {
+      _embedderReady = false;
+    }
     _catalog = await loadCatalog();
     if (newId == null || newId == _activeModelId) {
       if (mounted) setState(() {});
@@ -219,12 +236,46 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     _scrollToBottom();
 
+    // When documents are loaded, retrieve relevant passages and ground the
+    // answer on them (RAG). The retrieved excerpts augment the system prompt.
+    var systemContent = _systemPrompt;
+    List<String>? sources;
+    if (_documents.isNotEmpty) {
+      try {
+        await _ensureCorpus();
+        final ragJson = await _engine.ragQuery(text, topK: 4);
+        final parsed = jsonDecode(ragJson) as Map<String, dynamic>;
+        final chunks = (parsed['chunks'] as List?) ?? const [];
+        if (chunks.isNotEmpty) {
+          final buf = StringBuffer(_systemPrompt);
+          buf.writeln(
+              "\n\nAnswer the user's question using ONLY the document excerpts below. "
+              'Cite the source document (and page if shown). If the answer is not '
+              'in them, say you could not find it in the documents.\n');
+          final cited = <String>{};
+          for (final c in chunks) {
+            final map = c as Map<String, dynamic>;
+            final name = _docName(map['source'] as String?);
+            final content = (map['content'] as String?)?.trim() ?? '';
+            buf.writeln('\n--- Source: $name ---');
+            buf.writeln(content);
+            cited.add(_citationLabel(name, content));
+          }
+          systemContent = buf.toString();
+          sources = cited.toList();
+        }
+      } catch (e) {
+        // Retrieval failed (e.g. embedder unavailable) — answer without RAG.
+      }
+    }
+    assistant.sources = sources;
+
     // Build the conversation: a system prompt followed by the full history
     // (excluding the still-empty assistant placeholder). A user turn that has
     // an attached image carries it in an `images` array, which the engine's
     // vision encoder reads.
     final messagesJson = jsonEncode([
-      {'role': 'system', 'content': _systemPrompt},
+      {'role': 'system', 'content': systemContent},
       ..._messages.where((m) => m != assistant).map((m) {
         final msg = <String, dynamic>{'role': m.role, 'content': m.text};
         if (m.imagePath != null) msg['images'] = [m.imagePath];
@@ -272,6 +323,140 @@ class _ChatScreenState extends State<ChatScreen> {
       _lastStats = null;
       _pendingImagePath = null;
     });
+  }
+
+  // ── Documents (RAG) ────────────────────────────────────────────────────────
+
+  /// Lets the user attach a PDF/txt/md document, extract its text, and (re)build
+  /// the retrieval index so Eva can answer questions about it.
+  Future<void> _attachDocument() async {
+    if (_docBusy || _generating) return;
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: DocumentService.supportedExtensions,
+    );
+    final path = result?.files.single.path;
+    if (path == null) return;
+    setState(() => _docBusy = true);
+    try {
+      final info = await _docs.addFile(path);
+      await _docs.invalidateIndex();
+      _documents = await _docs.list();
+      _embedderReady = false; // force a rebuild including the new document
+      await _ensureCorpus();
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Added "${info.name}" — ask me about it.')),
+        );
+      }
+      _maybeNudgeDocModel();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not add document: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _docBusy = false);
+    }
+  }
+
+  /// Ensures the embedding model is downloaded and the corpus index is built.
+  /// Shows a progress dialog (download can be ~200 MB the first time).
+  Future<void> _ensureCorpus() async {
+    if (_embedderReady) return;
+    await _withProgressDialog('Setting up document search', (update) async {
+      final dir = await _models.ensureInstalled(
+          kEmbedderModel, (phase, p) => update(phase, p));
+      update('Indexing documents…', null);
+      await _engine.initCorpus(dir, await _docs.corpusPath());
+      _embedderReady = true;
+    });
+  }
+
+  /// Suggests the stronger Qwen3 model for document Q&A when a weaker model is
+  /// active (better synthesis of retrieved passages).
+  void _maybeNudgeDocModel() {
+    if (!mounted || _activeModelId == kDocQaModelId) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      duration: const Duration(seconds: 8),
+      content: const Text('Tip: Qwen3 1.7B gives better answers about documents.'),
+      action: SnackBarAction(
+        label: 'Use Qwen3',
+        onPressed: () => _switchModel(kDocQaModelId),
+      ),
+    ));
+  }
+
+  Future<void> _switchModel(String id) async {
+    if (id == _activeModelId) return;
+    _activeModelId = id;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('selected_model', id);
+    setState(() {
+      _messages.clear();
+      _lastStats = null;
+    });
+    await _prepareAndLoad();
+  }
+
+  String _docName(String? source) {
+    if (source == null || source.isEmpty) return 'document';
+    var s = source.split('/').last;
+    if (s.toLowerCase().endsWith('.txt')) s = s.substring(0, s.length - 4);
+    final match = _documents.where((d) => d.id == s);
+    return match.isNotEmpty ? match.first.name : source.split('/').last;
+  }
+
+  String _citationLabel(String name, String content) {
+    final m = RegExp(r'\[Page (\d+)\]').firstMatch(content);
+    return m != null ? '$name (p.${m.group(1)})' : name;
+  }
+
+  /// Runs [work] while showing a modal progress dialog. [work] gets an updater
+  /// `(phase, progress)`; progress is 0..1 or null for indeterminate.
+  Future<void> _withProgressDialog(
+    String title,
+    Future<void> Function(void Function(String, double?)) work,
+  ) async {
+    if (!mounted) return;
+    double? progress;
+    String phase = 'Preparing…';
+    StateSetter? setDlg;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => StatefulBuilder(
+        builder: (c, setState) {
+          setDlg = setState;
+          return AlertDialog(
+            title: Text(title),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(phase),
+                const SizedBox(height: 12),
+                LinearProgressIndicator(value: progress),
+                if (progress != null) ...[
+                  const SizedBox(height: 6),
+                  Text('${(progress! * 100).toStringAsFixed(0)}%'),
+                ],
+              ],
+            ),
+          );
+        },
+      ),
+    );
+    try {
+      await work((ph, p) {
+        phase = ph;
+        progress = p;
+        setDlg?.call(() {});
+      });
+    } finally {
+      if (mounted) Navigator.of(context).pop();
+    }
   }
 
   /// Toggles voice input. Starts/stops the streaming recognizer, feeding the
@@ -507,6 +692,21 @@ class _ChatScreenState extends State<ChatScreen> {
           padding: const EdgeInsets.all(8),
           child: Row(
             children: [
+              IconButton(
+                tooltip: 'Attach a document',
+                onPressed: (_generating || _docBusy) ? null : _attachDocument,
+                icon: _docBusy
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : _documents.isEmpty
+                        ? const Icon(Icons.attach_file)
+                        : Badge(
+                            label: Text('${_documents.length}'),
+                            child: const Icon(Icons.attach_file),
+                          ),
+              ),
               if (_visionActive)
                 IconButton(
                   tooltip: 'Attach a photo',
@@ -624,6 +824,7 @@ class _ChatScreenState extends State<ChatScreen> {
       return Align(alignment: Alignment.centerRight, child: bubble);
     }
     // Assistant messages show Eva's avatar, like a chat with her.
+    final sources = m.sources;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -634,7 +835,32 @@ class _ChatScreenState extends State<ChatScreen> {
             backgroundImage: AssetImage('assets/eva.png'),
           ),
         ),
-        Flexible(child: bubble),
+        Flexible(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              bubble,
+              if (sources != null && sources.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(left: 6, top: 2, bottom: 4),
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: -8,
+                    children: [
+                      for (final s in sources)
+                        Chip(
+                          avatar: const Icon(Icons.description_outlined, size: 14),
+                          label: Text(s, style: const TextStyle(fontSize: 11)),
+                          visualDensity: VisualDensity.compact,
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
+                        ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
       ],
     );
   }
