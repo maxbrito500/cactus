@@ -262,6 +262,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_documents.isNotEmpty) {
       try {
         await _ensureRag();
+        await _indexPending();
         final qvec = (await _engine.embedBatch([text])).first;
         final hits = await _rag!
             .query(queryVec: qvec, queryText: text, topK: 4);
@@ -281,7 +282,7 @@ class _ChatScreenState extends State<ChatScreen> {
           systemContent = buf.toString();
           sources = cited.toList();
         }
-      } catch (e) {
+      } catch (_) {
         // Retrieval failed (e.g. embedder unavailable) — answer without RAG.
       }
     }
@@ -359,16 +360,9 @@ class _ChatScreenState extends State<ChatScreen> {
       final info = await _docs.addFile(path);
       _documents = await _docs.list();
       await _ensureRag();
-      final text = await _docs.readText(info.id);
-      await _withProgressDialog('Indexing "${info.name}"', (update) async {
-        await _rag!.addDocument(
-          docId: info.id,
-          name: info.name,
-          fullText: text,
-          embed: _engine.embedBatch,
-          onProgress: (p) => update('Indexing…', p),
-        );
-      });
+      // Indexing (including this new document) flows through the self-heal path,
+      // which also resumes any previously-interrupted documents.
+      await _indexPending();
       if (mounted) {
         setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
@@ -400,6 +394,31 @@ class _ChatScreenState extends State<ChatScreen> {
       _rag?.close();
       _rag = await RagIndex.open(await _docs.corpusPath());
       _embedderReady = true;
+    });
+  }
+
+  /// Indexes any documents not yet in the current pack — covers a freshly added
+  /// document, documents carried over from an older format, and resuming an
+  /// indexing run that was interrupted (each document is rebuilt atomically).
+  Future<void> _indexPending() async {
+    if (_rag == null) return;
+    final indexed = _rag!.indexedDocIds;
+    final pending = _documents.where((d) => !indexed.contains(d.id)).toList();
+    if (pending.isEmpty) return;
+    await _withProgressDialog('Indexing documents', (update) async {
+      for (var i = 0; i < pending.length; i++) {
+        final d = pending[i];
+        final text = await _docs.readText(d.id);
+        if (text.trim().length < 8) continue;
+        await _rag!.addDocument(
+          docId: d.id,
+          name: d.name,
+          fullText: text,
+          embed: _engine.embedBatch,
+          onProgress: (p) =>
+              update('Indexing ${i + 1}/${pending.length}…', p),
+        );
+      }
     });
   }
 

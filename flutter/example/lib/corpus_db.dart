@@ -32,7 +32,8 @@ class CorpusDb {
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         chars INTEGER NOT NULL,
-        added_at TEXT NOT NULL
+        added_at TEXT NOT NULL,
+        indexed INTEGER NOT NULL DEFAULT 0
       );
     ''');
     db.execute('''
@@ -43,6 +44,15 @@ class CorpusDb {
         text TEXT NOT NULL
       );
     ''');
+    // Migrate older packs that predate the `indexed` column.
+    final cols = db
+        .select('PRAGMA table_info(documents);')
+        .map((r) => r['name'] as String)
+        .toSet();
+    if (!cols.contains('indexed')) {
+      db.execute(
+          'ALTER TABLE documents ADD COLUMN indexed INTEGER NOT NULL DEFAULT 0;');
+    }
     db.execute('CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);');
     db.execute('''
       CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
@@ -65,9 +75,23 @@ class CorpusDb {
 
   void upsertDocument(String id, String name, int chars, String addedAt) {
     _db.execute(
-      'INSERT OR REPLACE INTO documents(id, name, chars, added_at) VALUES(?,?,?,?);',
+      'INSERT OR REPLACE INTO documents(id, name, chars, added_at, indexed) '
+      'VALUES(?,?,?,?,0);',
       [id, name, chars, addedAt],
     );
+  }
+
+  void markIndexed(String id) =>
+      _db.execute('UPDATE documents SET indexed=1 WHERE id=?;', [id]);
+
+  /// Marks every document as not-indexed (e.g. after the vector format changed)
+  /// so the self-heal pass rebuilds them.
+  void resetIndexed() => _db.execute('UPDATE documents SET indexed=0;');
+
+  /// Ids of documents that finished indexing (used to skip/resume on open).
+  Set<String> indexedDocIds() {
+    final rs = _db.select('SELECT id FROM documents WHERE indexed=1;');
+    return {for (final r in rs) r['id'] as String};
   }
 
   /// Inserts a chunk and returns its row id (used as the vector key).

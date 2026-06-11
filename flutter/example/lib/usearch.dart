@@ -15,7 +15,7 @@ import 'package:ffi/ffi.dart';
 
 // scalar_kind enum values (from usearch.h).
 const int _scalarF32 = 1;
-const int _scalarF16 = 3;
+const int _scalarI8 = 4; // int8 quantization: ~lossless for cosine, 1 byte/dim.
 
 // metric_kind enum values.
 const int _metricCos = 1;
@@ -113,7 +113,7 @@ class UsearchIndex {
     opts.ref
       ..metricKind = _metricCos
       ..metric = nullptr
-      ..quantization = _scalarF16
+      ..quantization = _scalarI8
       ..dimensions = dimensions
       ..connectivity = 0
       ..expansionAdd = 0
