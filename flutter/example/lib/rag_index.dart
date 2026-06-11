@@ -28,11 +28,15 @@ typedef EmbedBatch = Future<List<Float32List>> Function(List<String> texts);
 /// (semantic) fused with SQLite FTS5 (keyword/BM25) via Reciprocal Rank Fusion.
 /// Both live inside the corpus pack so they travel with the storage location.
 class RagIndex {
-  RagIndex._(this._packDir, this._db, this._dim);
+  RagIndex._(this._packDir, this._db, this._dim, this._shardCapacity);
 
   final String _packDir;
   final CorpusDb _db;
   int _dim;
+
+  /// Max vectors per shard (defaults to [kShardCapacity]; lowered in tests to
+  /// exercise shard rollover with little data).
+  final int _shardCapacity;
 
   /// Sealed shards opened memory-mapped (read-only, search only).
   final List<UsearchIndex> _sealed = [];
@@ -66,7 +70,8 @@ class RagIndex {
   /// Opens (or creates) the pack at [packDir], loading the vector shards if any
   /// have already been built (sealed shards memory-mapped, the newest one in RAM
   /// so indexing can resume appending to it).
-  static Future<RagIndex> open(String packDir) async {
+  static Future<RagIndex> open(String packDir,
+      {int shardCapacity = kShardCapacity}) async {
     await Directory(packDir).create(recursive: true);
     final db = CorpusDb.open('$packDir/catalog.sqlite');
     final metaFile = File('$packDir/vectors.meta');
@@ -89,7 +94,7 @@ class RagIndex {
         shards = 0;
       }
     }
-    final idx = RagIndex._(packDir, db, dim);
+    final idx = RagIndex._(packDir, db, dim, shardCapacity);
     if (dim > 0 && shards > 0) {
       try {
         // Older, full shards: memory-mapped, read-only.
@@ -191,7 +196,7 @@ class RagIndex {
   /// Seals the active shard to disk (then memory-maps it) and starts a fresh one
   /// once it reaches [kShardCapacity], bounding peak RAM.
   Future<void> _rollShardIfFull() async {
-    if (_active == null || _active!.length < kShardCapacity) return;
+    if (_active == null || _active!.length < _shardCapacity) return;
     final path = _shardPath(_activeShard);
     _active!.save(path);
     _active!.close();
@@ -207,7 +212,7 @@ class RagIndex {
   void _reserveActive(int additional) {
     final need = _active!.length + additional;
     if (need <= _activeReserved) return;
-    final target = math.min(kShardCapacity,
+    final target = math.min(_shardCapacity,
         math.max(need, _activeReserved + 8192));
     _active!.reserve(target);
     _activeReserved = target;
