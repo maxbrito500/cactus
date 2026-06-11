@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -9,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:file_picker/file_picker.dart';
 
 import 'app_prefs.dart';
+import 'background_indexer.dart';
 import 'document_service.dart';
 import 'inference_isolate.dart';
 import 'model_catalog.dart';
@@ -89,6 +91,7 @@ class _ChatScreenState extends State<ChatScreen> {
   List<DocumentInfo> _documents = const [];
   String _corpusLocation = '';
   RagIndex? _rag;
+  IndexingController? _indexer;
   bool _embedderReady = false;
   bool _docBusy = false;
   String _systemPrompt = kDefaultSystemPrompt;
@@ -117,6 +120,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _scroll.dispose();
     _voice.dispose();
     _systemVoice.dispose();
+    _indexer?.removeListener(_onIndexerProgress);
+    _indexer?.dispose();
     _rag?.close();
     super.dispose();
   }
@@ -184,6 +189,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final docsNow = _documents.map((d) => d.id).toSet();
     // A changed corpus location closes the current index (it lives in the pack).
     if (_corpusLocation != locBefore) {
+      await _indexer?.stop();
       _rag?.close();
       _rag = null;
       _embedderReady = false;
@@ -262,7 +268,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_documents.isNotEmpty) {
       try {
         await _ensureRag();
-        await _indexPending();
+        // Yield the embedder to this turn; query whatever is already indexed
+        // (background indexing continues afterward). Resumed in the finally.
+        await _indexer?.stop();
         final qvec = (await _engine.embedBatch([text])).first;
         final hits = await _rag!
             .query(queryVec: qvec, queryText: text, topK: 4);
@@ -330,6 +338,8 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {
       setState(() => _generating = false);
     }
+    // The turn is done — let background indexing of the backlog continue.
+    _indexer?.resume();
     _scrollToBottom();
   }
 
@@ -359,14 +369,15 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final info = await _docs.addFile(path);
       _documents = await _docs.list();
+      // Opening the pack starts the background indexer, which picks up this new
+      // document (and resumes any interrupted ones) without blocking the UI.
       await _ensureRag();
-      // Indexing (including this new document) flows through the self-heal path,
-      // which also resumes any previously-interrupted documents.
-      await _indexPending();
+      _indexer?.resume();
+      unawaited(_indexer?.run() ?? Future.value());
       if (mounted) {
         setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Added "${info.name}" — ask me about it.')),
+          SnackBar(content: Text('Added "${info.name}" — indexing in background.')),
         );
       }
       _maybeNudgeDocModel();
@@ -391,35 +402,22 @@ class _ChatScreenState extends State<ChatScreen> {
           kEmbedderModel, (phase, p) => update(phase, p));
       update('Loading…', null);
       await _engine.loadEmbedder(dir);
+      await _indexer?.stop();
       _rag?.close();
       _rag = await RagIndex.open(await _docs.corpusPath());
       _embedderReady = true;
     });
+    // Start (or resume) indexing the backlog in the background — non-blocking,
+    // so the chat stays usable and queries hit whatever is already indexed.
+    _indexer ??= IndexingController(_docs, _engine.embedBatch)
+      ..addListener(_onIndexerProgress);
+    _indexer!.bind(_rag!);
+    _indexer!.resume();
+    unawaited(_indexer!.run());
   }
 
-  /// Indexes any documents not yet in the current pack — covers a freshly added
-  /// document, documents carried over from an older format, and resuming an
-  /// indexing run that was interrupted (each document is rebuilt atomically).
-  Future<void> _indexPending() async {
-    if (_rag == null) return;
-    final indexed = _rag!.indexedDocIds;
-    final pending = _documents.where((d) => !indexed.contains(d.id)).toList();
-    if (pending.isEmpty) return;
-    await _withProgressDialog('Indexing documents', (update) async {
-      for (var i = 0; i < pending.length; i++) {
-        final d = pending[i];
-        final text = await _docs.readText(d.id);
-        if (text.trim().length < 8) continue;
-        await _rag!.addDocument(
-          docId: d.id,
-          name: d.name,
-          fullText: text,
-          embed: _engine.embedBatch,
-          onProgress: (p) =>
-              update('Indexing ${i + 1}/${pending.length}…', p),
-        );
-      }
-    });
+  void _onIndexerProgress() {
+    if (mounted) setState(() {});
   }
 
   /// Suggests the stronger Qwen3 model for document Q&A when a weaker model is
@@ -663,12 +661,39 @@ class _ChatScreenState extends State<ChatScreen> {
               icon: const Icon(Icons.tune),
             ),
         ],
+        bottom: _indexingBanner(),
       ),
       body: switch (_phase) {
         AppPhase.ready => _buildChat(),
         AppPhase.error => _buildError(),
         _ => _buildLoading(),
       },
+    );
+  }
+
+  /// A thin progress strip shown under the AppBar while the background indexer
+  /// is working through the document backlog (null = nothing to show).
+  PreferredSizeWidget? _indexingBanner() {
+    final ix = _indexer;
+    if (ix == null || !ix.isIndexing || ix.pending <= 0) return null;
+    final label = ix.currentName == null
+        ? 'Indexing ${ix.pending} document${ix.pending == 1 ? '' : 's'}…'
+        : 'Indexing "${ix.currentName}" — ${ix.pending} left';
+    return PreferredSize(
+      preferredSize: const Size.fromHeight(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const LinearProgressIndicator(minHeight: 2),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(label, style: const TextStyle(fontSize: 11)),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

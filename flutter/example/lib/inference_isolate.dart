@@ -20,6 +20,10 @@ class InferenceEngine {
   Completer<void>? _resetCompleter;
   Completer<void>? _embedderCompleter;
   Completer<List<Float32List>>? _embedCompleter;
+  // Serializes embed requests: the worker handles one command at a time and we
+  // keep a single in-flight completer, so concurrent callers (background indexer
+  // + chat query) must not overlap. Each call chains after the previous.
+  Future<void> _embedGate = Future<void>.value();
   StreamController<String>? _tokenController;
   Completer<Map<String, dynamic>>? _doneCompleter;
 
@@ -126,9 +130,14 @@ class InferenceEngine {
   /// Embeds each text in [texts] with the loaded embedder, returning a unit-norm
   /// vector per text (in order).
   Future<List<Float32List>> embedBatch(List<String> texts) {
-    _embedCompleter = Completer<List<Float32List>>();
-    _toWorker.send({'cmd': 'embed_batch', 'texts': texts});
-    return _embedCompleter!.future;
+    final result = _embedGate.then((_) {
+      _embedCompleter = Completer<List<Float32List>>();
+      _toWorker.send({'cmd': 'embed_batch', 'texts': texts});
+      return _embedCompleter!.future;
+    });
+    // Keep the gate open for the next caller regardless of this call's outcome.
+    _embedGate = result.then((_) {}, onError: (_) {});
+    return result;
   }
 
   /// Runs a chat completion. [messagesJson] is a JSON array of
