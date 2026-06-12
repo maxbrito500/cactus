@@ -7,6 +7,8 @@
 *.gguf
 *.npy
 *.cg
+# Local marker recording the source hash of the installed libcactus.so.
+.libcactus.so.hash
 
 !cactus-engine/libs/curl/**/*.a
 !android/mbedtls/**/*.a
