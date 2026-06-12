@@ -4,8 +4,8 @@
      EvaVoiceInteractionSession. -->
 <voice-interaction-service
     xmlns:android="http://schemas.android.com/apk/res/android"
-    android:sessionService="com.cactuscompute.cactus_example.EvaVoiceInteractionSessionService"
-    android:recognitionService="com.cactuscompute.cactus_example.EvaRecognitionService"
+    android:sessionService="radio.geogram.eva.EvaVoiceInteractionSessionService"
+    android:recognitionService="radio.geogram.eva.EvaRecognitionService"
     android:supportsAssist="true"
     android:supportsLaunchVoiceAssistFromKeyguard="true"
     android:supportsLocalInteraction="true" />

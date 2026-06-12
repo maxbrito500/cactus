@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.cactuscompute.cactus_example"
+    namespace = "radio.geogram.eva"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -20,8 +20,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.cactuscompute.cactus_example"
+        applicationId = "radio.geogram.eva"
         // libcactus.so is built only for arm64-v8a, so restrict the APK to that ABI.
         // The `record` mic plugin requires API 23+, so floor minSdk at 23.
         minSdk = maxOf(23, flutter.minSdkVersion)

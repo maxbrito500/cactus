@@ -1,4 +1,4 @@
-package com.cactuscompute.cactus_example
+package radio.geogram.eva
 
 import android.content.Intent
 import android.speech.RecognitionService
