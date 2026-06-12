@@ -45,3 +45,27 @@ android {
 flutter {
     source = "../.."
 }
+
+// Build (or restore from cache) the native FFI library before assembling the
+// app, so it never has to be produced by hand. native/build.sh is
+// content-addressed: it skips in ~0.02s when libcactus.so is already current and
+// restores from a machine-level cache otherwise (see native/README.md). A real
+// change to the native sources triggers a recompile, which needs the Android
+// NDK. Skipped on Windows / if the script is absent (the lib is arm64-only and
+// developed on Linux/macOS).
+val ensureNativeFfi by tasks.registering(Exec::class) {
+    val script = rootProject.file("../native/build.sh")
+    onlyIf {
+        script.exists() &&
+            !System.getProperty("os.name").lowercase().contains("windows")
+    }
+    workingDir = rootProject.projectDir
+    // Expose the SDK so build.sh can locate the NDK if an actual recompile is
+    // needed (cache hits don't need it).
+    environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+    commandLine("bash", script.absolutePath)
+}
+
+tasks.named("preBuild") {
+    dependsOn(ensureNativeFfi)
+}

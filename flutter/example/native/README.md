@@ -28,15 +28,20 @@ change triggers a rebuild.
 
 ### Typical loop
 
-```bash
-# Once per checkout / after pulling native changes (cheap — usually instant):
-bash native/build.sh
+A Gradle hook (`ensureNativeFfi` in `android/app/build.gradle.kts`, wired into
+`preBuild`) runs this script automatically before the app is assembled, so you
+normally never invoke it by hand — just build/run as usual:
 
-# Then iterate on Dart with no native rebuild:
+```bash
 flutter run            # hot reload (r) / hot restart (R) for Dart-only changes
-flutter build apk      # packages the cached .so
+flutter build apk      # the hook ensures the .so (instant when current)
 flutter test integration_test/rag_device_test.dart -d <deviceId>
 ```
+
+The hook is instant on a cache hit and doesn't need the NDK; it only compiles
+(needing the NDK, which it locates via the Android SDK) when native sources
+actually changed. Run `bash native/build.sh` directly if you want to build the
+library on its own.
 
 `flutter clean` removes `build/` but **not** `jniLibs/`, so the installed `.so`
 survives it. Even a full `git clean` only costs one cache restore (~0.1 s) as

@@ -38,6 +38,12 @@ endif()
 # usearch (HNSW ANN) C binding, compiled directly into the shared lib so its
 # extern "C" symbols (usearch_*) are exported for Dart FFI. Header-only C++ core.
 set(USEARCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/usearch)
+# Placeholder translation unit: the cactus_ffi symbols come from the
+# whole-archived engine libs + usearch's lib.cpp, but a SHARED library still
+# needs at least one source. The engine subproject only writes this stub when it
+# is the top-level project (CMAKE_SOURCE_DIR guard), so create it here too — this
+# is the top-level CMakeLists for the standalone FFI build.
+file(WRITE ${CMAKE_BINARY_DIR}/stub.cpp "")
 add_library(cactus_ffi SHARED
     ${CMAKE_BINARY_DIR}/stub.cpp
     ${USEARCH_DIR}/lib.cpp

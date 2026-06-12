@@ -13,6 +13,10 @@
 # Only a real change to native sources triggers an actual (incremental) compile.
 # Set FORCE=1 to always recompile (e.g. after an NDK upgrade).
 
+# Fail hard on any error: a -e in the shebang is ignored under `bash build.sh`,
+# so set it explicitly (otherwise a failed cmake would still stamp a missing .so).
+set -e
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$SCRIPT_DIR/build"
@@ -33,31 +37,19 @@ else
     _sha() { shasum -a 256 | awk '{print $1}'; }
 fi
 
-# A content signature of all native build inputs. Uses git for the (large)
-# engine tree — HEAD plus the exact content of any locally-modified/untracked
-# files under the build-input paths — so both committed and uncommitted changes
-# invalidate the cache. Falls back to hashing file contents when not in git.
+# A content signature of every native build input: the actual file contents of
+# the engine sources (cactus/, cactus-engine/) and this native/ dir (CMakeLists
+# + usearch). Purely content-based — no git, no mtimes — so it is identical no
+# matter who/what invokes the script (interactive shell, Gradle, CI) and is
+# stable across clones. Hashing ~150 files takes ~40ms.
 compute_hash() {
     {
         echo "$ABI $ANDROID_PLATFORM"
-        cat "$SCRIPT_DIR/CMakeLists.txt"
-        find "$SCRIPT_DIR/usearch" -type f \
+        find "$CACTUS_ROOT/cactus" "$CACTUS_ROOT/cactus-engine" "$SCRIPT_DIR" \
+            -type f -not -path '*/build/*' \
             \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' \
-               -o -name '*.h' -o -name '*.hpp' \) -print0 2>/dev/null \
-            | sort -z | xargs -0 cat 2>/dev/null
-        if git -C "$CACTUS_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-            git -C "$CACTUS_ROOT" rev-parse HEAD
-            git -C "$CACTUS_ROOT" status --porcelain -- cactus cactus-engine \
-                    flutter/example/native 2>/dev/null \
-                | awk '{print $NF}' | while read -r f; do
-                    [ -f "$CACTUS_ROOT/$f" ] && cat "$CACTUS_ROOT/$f"
-                done
-        else
-            find "$CACTUS_ROOT/cactus" "$CACTUS_ROOT/cactus-engine" -type f \
-                \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' \
-                   -o -name '*.h' -o -name '*.hpp' -o -name 'CMakeLists.txt' \) \
-                -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
-        fi
+               -o -name '*.h' -o -name '*.hpp' -o -name 'CMakeLists.txt' \) \
+            -print0 2>/dev/null | LC_ALL=C sort -z | xargs -0 cat 2>/dev/null
     } | _sha
 }
 
@@ -108,10 +100,16 @@ cmake -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
 
 cmake --build "$BUILD_DIR" --config Release -j "$n_cpu"
 
+BUILT="$BUILD_DIR/lib/libcactus.so"
+if [ ! -f "$BUILT" ]; then
+    echo "Error: build did not produce $BUILT" >&2
+    exit 1
+fi
 mkdir -p "$JNI_DIR"
-cp "$BUILD_DIR/lib/libcactus.so" "$SO"
+cp "$BUILT" "$SO"
+# Record the stamp + cache only after the .so is in place, so a failed build
+# never leaves a stale stamp claiming success.
 echo "$HASH" > "$STAMP"
-# Populate the machine-level cache so a future clean checkout reuses this build.
 mkdir -p "$CACHE_DIR"
 cp "$SO" "$CACHED"
 echo "Installed: $SO  (cached as ${HASH:0:12})"
