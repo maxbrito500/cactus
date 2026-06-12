@@ -85,6 +85,25 @@ Future<void> saveVoiceLocale(String localeId) async {
   await prefs.setString(_kVoiceLocaleKey, localeId);
 }
 
+// ── Reply length ─────────────────────────────────────────────────────────────
+
+/// Cap on generated tokens per reply. 1024 ≈ a few paragraphs; raise it for
+/// long-form answers at the cost of slower turns.
+const int kDefaultMaxTokens = 1024;
+const List<int> kMaxTokensChoices = [256, 1024, 2048];
+
+const String _kMaxTokensKey = 'max_tokens';
+
+Future<int> loadMaxTokens() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getInt(_kMaxTokensKey) ?? kDefaultMaxTokens;
+}
+
+Future<void> saveMaxTokens(int value) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setInt(_kMaxTokensKey, value);
+}
+
 // ── Document corpus location ─────────────────────────────────────────────────
 
 const String _kCorpusLocationKey = 'corpus_location';

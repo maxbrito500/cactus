@@ -48,6 +48,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _voiceLocale = '';
   List<stt.LocaleName> _locales = const [];
   bool _localesLoading = false;
+  int _maxTokens = kDefaultMaxTokens;
   String? _error;
 
   @override
@@ -70,6 +71,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _voiceInstalled = await _voice.isModelInstalled();
     _voiceEngine = await loadVoiceEngine();
     _voiceLocale = await loadVoiceLocale();
+    _maxTokens = await loadMaxTokens();
     _documents = await _docs.list();
     _corpusLocation = await _docs.locationLabel();
     await _refreshInstalled();
@@ -358,6 +360,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 },
                 child: const Text('Reset to default'),
               ),
+            ),
+          ),
+          ListTile(
+            title: const Text('Reply length'),
+            subtitle: const Text('Longer replies take more time to generate.'),
+            trailing: SegmentedButton<int>(
+              segments: const [
+                ButtonSegment(value: 256, label: Text('Short')),
+                ButtonSegment(value: 1024, label: Text('Normal')),
+                ButtonSegment(value: 2048, label: Text('Long')),
+              ],
+              selected: {
+                kMaxTokensChoices.contains(_maxTokens)
+                    ? _maxTokens
+                    : kDefaultMaxTokens
+              },
+              onSelectionChanged: (s) {
+                setState(() => _maxTokens = s.first);
+                saveMaxTokens(s.first);
+              },
             ),
           ),
           const Divider(),

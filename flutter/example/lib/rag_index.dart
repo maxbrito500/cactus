@@ -67,6 +67,35 @@ class RagIndex {
   int get shardCount => _active != null ? _activeShard + 1 : _sealed.length;
   bool get isEmpty => _db.chunkCount == 0;
 
+  /// Vectors whose chunk was deleted (document removal leaves them in the
+  /// shards as harmless orphans; they waste space and candidate slots).
+  int get orphanVectorCount {
+    final n = vectorCount - _db.chunkCount;
+    return n > 0 ? n : 0;
+  }
+
+  /// Drops all vector shards and marks every document not-indexed, so the
+  /// self-heal indexer rebuilds a compact index from the stored documents.
+  /// Used when [orphanVectorCount] grows large after many deletions.
+  Future<void> resetVectors() async {
+    _disposeShards();
+    _dim = 0;
+    final dir = Directory(_packDir);
+    if (await dir.exists()) {
+      await for (final e in dir.list()) {
+        final name = e.uri.pathSegments.last;
+        if (e is File &&
+            (RegExp(r'^vectors\.\d+\.usearch$').hasMatch(name) ||
+                name == 'vectors.meta')) {
+          try {
+            await e.delete();
+          } catch (_) {}
+        }
+      }
+    }
+    _db.resetIndexed();
+  }
+
   /// Opens (or creates) the pack at [packDir], loading the vector shards if any
   /// have already been built (sealed shards memory-mapped, the newest one in RAM
   /// so indexing can resume appending to it).

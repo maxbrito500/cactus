@@ -224,8 +224,6 @@ class DocumentService {
     if (await f.exists()) await f.delete();
     final docs = (await list()).where((d) => d.id != id).toList();
     await _saveList(docs);
-    // Drop the cached index so it rebuilds without the removed document.
-    await _clearIndexCache();
   }
 
   Future<void> clearAll() async {
@@ -234,18 +232,6 @@ class DocumentService {
       await for (final e in dir.list()) {
         if (e is File) await e.delete();
       }
-    }
-  }
-
-  /// Forces the corpus index to rebuild on next load (after docs change).
-  Future<void> invalidateIndex() => _clearIndexCache();
-
-  /// Removes the engine's cached corpus index so it is rebuilt next load.
-  Future<void> _clearIndexCache() async {
-    final dir = await corpusPath();
-    for (final n in ['index.bin', 'data.bin']) {
-      final f = File('$dir/$n');
-      if (await f.exists()) await f.delete();
     }
   }
 

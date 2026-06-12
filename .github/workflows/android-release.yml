@@ -235,9 +235,13 @@ jobs:
 
       - name: Build APK
         working-directory: flutter/example
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           flutter pub get
-          flutter build apk --release --target-platform android-arm64
+          # The baked-in tag powers the in-app "new version available" banner.
+          flutter build apk --release --target-platform android-arm64 \
+            --dart-define=EVA_RELEASE_TAG="$TAG"
 
       - name: Stage APK
         run: |

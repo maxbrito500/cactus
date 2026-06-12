@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -11,9 +11,13 @@ import 'package:file_picker/file_picker.dart';
 
 import 'package:flutter_tts/flutter_tts.dart';
 
+import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
+
 import 'app_prefs.dart';
 import 'assistant_channel.dart';
 import 'background_indexer.dart';
+import 'chat_store.dart';
 import 'document_service.dart';
 import 'inference_isolate.dart';
 import 'model_catalog.dart';
@@ -21,6 +25,7 @@ import 'model_manager.dart';
 import 'rag_index.dart';
 import 'settings_screen.dart';
 import 'system_voice.dart';
+import 'update_check.dart';
 import 'voice_service.dart';
 
 const Color _seedColor = Color(0xFF2E7D32);
@@ -84,6 +89,10 @@ class _ChatScreenState extends State<ChatScreen> {
   final ScrollController _scroll = ScrollController();
 
   final List<ChatMessage> _messages = [];
+  // Persistent chat history: current conversation + drawer list.
+  ChatStore? _chats;
+  int? _convId;
+  List<ConversationInfo> _convs = const [];
   final ImagePicker _picker = ImagePicker();
   final VoiceService _voice = VoiceService();
   final SystemVoiceService _systemVoice = SystemVoiceService();
@@ -98,6 +107,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _embedderReady = false;
   bool _docBusy = false;
   String _systemPrompt = kDefaultSystemPrompt;
+  int _maxTokens = kDefaultMaxTokens;
   List<ModelSpec> _catalog = kBuiltinCatalog;
   String _activeModelId = kDefaultModelId;
   AppPhase _phase = AppPhase.preparing;
@@ -112,6 +122,15 @@ class _ChatScreenState extends State<ChatScreen> {
   final FlutterTts _tts = FlutterTts();
   bool _assistMode = false;
   bool _assistPending = false;
+  // Language of the current turn (base code like 'en'), detected once from the
+  // user's input and used for both the model directive and the TTS voice, so
+  // input, reply and speech stay in the same language.
+  String? _turnLang;
+  // Tag of a newer published release (shows the update banner), and a
+  // dismissible notice for failures that would otherwise be silent.
+  String? _updateTag;
+  String? _notice;
+  Object? _seenIndexError;
 
   /// Whether the active model can see images (exposes the attach button).
   bool get _visionActive => modelById(_catalog, _activeModelId).isVision;
@@ -133,7 +152,169 @@ class _ChatScreenState extends State<ChatScreen> {
     _indexer?.removeListener(_onIndexerProgress);
     _indexer?.dispose();
     _rag?.close();
+    _chats?.close();
     super.dispose();
+  }
+
+  // ── Chat history (persistence + conversation list) ─────────────────────────
+
+  /// Opens the chat store and restores the most recent conversation, so the
+  /// chat survives app restarts.
+  Future<void> _openChatStore() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      _chats = ChatStore.open('${docs.path}/chats.sqlite');
+      _convs = _chats!.listConversations();
+      final latest = _chats!.latestConversationId();
+      if (latest != null) _restoreConversation(latest);
+    } catch (_) {/* history unavailable — chat still works, unpersisted */}
+  }
+
+  void _restoreConversation(int id) {
+    final stored = _chats?.messages(id);
+    if (stored == null) return;
+    _convId = id;
+    _messages
+      ..clear()
+      ..addAll(stored.map((m) => ChatMessage(
+            m.role,
+            m.text,
+            // Attached images live in a cache dir and may have been purged.
+            imagePath: (m.imagePath != null && File(m.imagePath!).existsSync())
+                ? m.imagePath
+                : null,
+            sources: m.sources,
+          )));
+    if (mounted) setState(() {});
+  }
+
+  /// Switches the UI (and the model's KV cache) to conversation [id].
+  Future<void> _openConversation(int id) async {
+    if (_generating || id == _convId) return;
+    await _engine.reset();
+    _restoreConversation(id);
+    _scrollToBottom();
+  }
+
+  /// Persists [m] into the current conversation, creating the conversation on
+  /// the first message (titled from it).
+  void _persistMessage(ChatMessage m) {
+    final chats = _chats;
+    if (chats == null || m.text.isEmpty && m.imagePath == null) return;
+    try {
+      if (_convId == null) {
+        final title = m.text.replaceAll(RegExp(r'\s+'), ' ').trim();
+        _convId = chats.createConversation(
+            title.length > 40 ? '${title.substring(0, 40)}…' : title);
+      }
+      chats.addMessage(
+          _convId!,
+          StoredMessage(
+              role: m.role,
+              text: m.text,
+              imagePath: m.imagePath,
+              sources: m.sources));
+      _convs = chats.listConversations();
+    } catch (_) {/* persistence is best-effort */}
+  }
+
+  Future<void> _renameConversation(ConversationInfo c) async {
+    final ctl = TextEditingController(text: c.title);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename chat'),
+        content: TextField(controller: ctl, autofocus: true),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctl.text.trim()),
+              child: const Text('Rename')),
+        ],
+      ),
+    );
+    if (name != null && name.isNotEmpty) {
+      _chats?.renameConversation(c.id, name);
+      setState(() => _convs = _chats?.listConversations() ?? _convs);
+    }
+  }
+
+  Future<void> _deleteConversation(ConversationInfo c) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete "${c.title}"?'),
+        content: const Text('This removes the chat permanently.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    _chats?.deleteConversation(c.id);
+    if (c.id == _convId) {
+      _convId = null;
+      _messages.clear();
+      await _engine.reset();
+    }
+    setState(() => _convs = _chats?.listConversations() ?? _convs);
+  }
+
+  Widget _buildDrawer() {
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.add_comment_outlined),
+              title: const Text('New chat'),
+              onTap: () {
+                Navigator.pop(context);
+                _newChat();
+              },
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: _convs.isEmpty
+                  ? const Center(child: Text('No chats yet.'))
+                  : ListView.builder(
+                      itemCount: _convs.length,
+                      itemBuilder: (context, i) {
+                        final c = _convs[i];
+                        return ListTile(
+                          selected: c.id == _convId,
+                          leading: const Icon(Icons.chat_bubble_outline),
+                          title: Text(c.title,
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                          onTap: () {
+                            Navigator.pop(context);
+                            _openConversation(c.id);
+                          },
+                          trailing: PopupMenuButton<String>(
+                            onSelected: (v) => v == 'rename'
+                                ? _renameConversation(c)
+                                : _deleteConversation(c),
+                            itemBuilder: (_) => const [
+                              PopupMenuItem(
+                                  value: 'rename', child: Text('Rename')),
+                              PopupMenuItem(
+                                  value: 'delete', child: Text('Delete')),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   // ── Digital assistant (power-button invocation) ────────────────────────────
@@ -203,7 +384,9 @@ class _ChatScreenState extends State<ChatScreen> {
         .trim();
     if (clean.isEmpty) return;
     try {
-      final tag = _ttsLocaleFor(_detectLangBase(clean)) ??
+      // Voice priority: the language the user spoke this turn, then the
+      // language detected in the reply text, then the configured voice locale.
+      final tag = _ttsLocaleFor(_turnLang ?? _detectLangBase(clean)) ??
           (_voiceLocale.isNotEmpty ? _voiceLocale.replaceAll('_', '-') : null);
       if (tag != null && (await _tts.isLanguageAvailable(tag)) == true) {
         await _tts.setLanguage(tag);
@@ -212,11 +395,24 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {/* TTS unavailable — silently skip */}
   }
 
-  /// One concise instruction (used in assistant mode) telling the model to
-  /// answer in the user's own language rather than drifting to another one.
-  static const String _assistLangDirective =
-      'Always reply in the same language the user used in their most recent '
-      'message. Do not switch to a different language.';
+  /// Instruction (used in assistant mode) keeping the reply in the user's
+  /// language. When the input language was detected, name it explicitly — far
+  /// more reliable with small models than a generic "same language" rule.
+  String get _assistLangDirective {
+    const names = {
+      'en': 'English',
+      'pt': 'Portuguese',
+      'fr': 'French',
+      'es': 'Spanish',
+      'de': 'German',
+      'it': 'Italian',
+    };
+    final name = names[_turnLang];
+    return name != null
+        ? 'Reply only in $name. Do not use any other language.'
+        : 'Always reply in the same language the user used in their most '
+            'recent message. Do not switch to a different language.';
+  }
 
   /// Lower-cases an ALL-CAPS transcript (some recognizers return uppercase) and
   /// capitalizes sentence starts. Leaves already-mixed-case text untouched so
@@ -293,8 +489,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _bootstrap() async {
+    // Non-blocking: shows a banner if a newer release was published.
+    unawaited(checkForNewerRelease().then((tag) {
+      if (tag != null && mounted) setState(() => _updateTag = tag);
+    }));
     await _engine.start();
+    await _openChatStore();
     _systemPrompt = await loadSystemPrompt();
+    _maxTokens = await loadMaxTokens();
     _voiceEngine = await loadVoiceEngine();
     _voiceLocale = await loadVoiceLocale();
     _corpusLocation = await loadCorpusLocation();
@@ -346,6 +548,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     // Persona, voice settings, documents and sideloaded models may have changed.
     _systemPrompt = await loadSystemPrompt();
+    _maxTokens = await loadMaxTokens();
     _voiceEngine = await loadVoiceEngine();
     _voiceLocale = await loadVoiceLocale();
     final docsBefore = _documents.map((d) => d.id).toSet();
@@ -410,6 +613,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty && imagePath == null) return;
     if (_generating) return;
     await _tts.stop(); // don't talk over the next turn
+    // Pin this turn's language from the user's own words (keeps directive and
+    // TTS voice consistent; falls back to the previous turn's when unsure).
+    _turnLang = _detectLangBase(text) ?? _turnLang;
     // Sending finalizes any in-progress dictation.
     if (_voice.isListening || _systemVoice.isListening) {
       await _voice.stop();
@@ -420,13 +626,15 @@ class _ChatScreenState extends State<ChatScreen> {
     _input.clear();
 
     final assistant = ChatMessage('assistant', '');
+    final user = ChatMessage('user', text, imagePath: imagePath);
     setState(() {
-      _messages.add(ChatMessage('user', text, imagePath: imagePath));
+      _messages.add(user);
       _messages.add(assistant);
       _generating = true;
       _lastStats = null;
       _pendingImagePath = null;
     });
+    _persistMessage(user);
     _scrollToBottom();
 
     // When documents are loaded, retrieve relevant passages and ground the
@@ -459,7 +667,13 @@ class _ChatScreenState extends State<ChatScreen> {
           sources = cited.toList();
         }
       } catch (_) {
-        // Retrieval failed (e.g. embedder unavailable) — answer without RAG.
+        // Retrieval failed (e.g. embedder unavailable) — answer without RAG,
+        // but tell the user instead of failing silently.
+        if (mounted) {
+          setState(() => _notice =
+              'Document search is unavailable right now — answering without '
+              'your documents.');
+        }
       }
     }
     assistant.sources = sources;
@@ -468,19 +682,32 @@ class _ChatScreenState extends State<ChatScreen> {
     // otherwise sometimes drifts to another language).
     if (_assistMode) systemContent = '$systemContent\n\n$_assistLangDirective';
 
-    // Build the conversation: a system prompt followed by the full history
-    // (excluding the still-empty assistant placeholder). A user turn that has
-    // an attached image carries it in an `images` array, which the engine's
-    // vision encoder reads.
+    // Build the conversation: a system prompt followed by recent history
+    // (excluding the still-empty assistant placeholder). History is trimmed
+    // oldest-first so prompt + reply fit the model's 4096-token context —
+    // otherwise a long chat silently overflows and degrades. ~3 chars/token is
+    // a conservative multilingual estimate. A user turn that has an attached
+    // image carries it in an `images` array (vision models).
+    final history = _messages.where((m) => m != assistant).toList();
+    final promptBudgetChars = (4096 - _maxTokens - 64).clamp(512, 1 << 20) * 3 -
+        systemContent.length;
+    final kept = <ChatMessage>[];
+    var used = 0;
+    for (final m in history.reversed) {
+      used += m.text.length + 16;
+      // Always keep the newest (current) user turn, whatever its size.
+      if (kept.isNotEmpty && used > promptBudgetChars) break;
+      kept.add(m);
+    }
     final messagesJson = jsonEncode([
       {'role': 'system', 'content': systemContent},
-      ..._messages.where((m) => m != assistant).map((m) {
+      ...kept.reversed.map((m) {
         final msg = <String, dynamic>{'role': m.role, 'content': m.text};
         if (m.imagePath != null) msg['images'] = [m.imagePath];
         return msg;
       }),
     ]);
-    const options = '{"max_tokens":256,"temperature":0.7}';
+    final options = '{"max_tokens":$_maxTokens,"temperature":0.7}';
 
     final run = _engine.complete(messagesJson, optionsJson: options);
     run.tokens.listen(
@@ -512,6 +739,7 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {
       setState(() => _generating = false);
     }
+    if (assistant.text.isNotEmpty) _persistMessage(assistant);
     // The turn is done — let background indexing of the backlog continue.
     _indexer?.resume();
     _scrollToBottom();
@@ -521,6 +749,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_generating) return;
     await _engine.reset();
     setState(() {
+      _convId = null; // next message starts a fresh stored conversation
       _messages.clear();
       _lastStats = null;
       _pendingImagePath = null;
@@ -581,6 +810,14 @@ class _ChatScreenState extends State<ChatScreen> {
       _rag = await RagIndex.open(await _docs.corpusPath());
       _embedderReady = true;
     });
+    // Compaction: after many document deletions the shards accumulate orphaned
+    // vectors. When more than a quarter of the index (and a meaningful amount)
+    // is orphans, drop the vectors and let the self-heal indexer rebuild.
+    final rag = _rag!;
+    final orphans = rag.orphanVectorCount;
+    if (orphans > 500 && orphans * 4 > rag.vectorCount) {
+      await rag.resetVectors();
+    }
     // Start (or resume) indexing the backlog in the background — non-blocking,
     // so the chat stays usable and queries hit whatever is already indexed.
     _indexer ??= IndexingController(_docs, _engine.embedBatch)
@@ -591,7 +828,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onIndexerProgress() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    // Surface a failed indexing run once (it would otherwise be silent).
+    final err = _indexer?.lastError;
+    if (err != null && !identical(err, _seenIndexError)) {
+      _seenIndexError = err;
+      _notice = 'Document indexing hit a problem and will retry: $err';
+    }
+    setState(() {});
   }
 
   /// Suggests the stronger Qwen3 model for document Q&A when a weaker model is
@@ -614,6 +858,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('selected_model', id);
     setState(() {
+      _convId = null; // a model switch starts a fresh stored conversation
       _messages.clear();
       _lastStats = null;
     });
@@ -818,6 +1063,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      drawer: _phase == AppPhase.ready ? _buildDrawer() : null,
       appBar: AppBar(
         title: const Text('Eva'),
         actions: [
@@ -915,6 +1161,8 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildChat() {
     return Column(
       children: [
+        if (_updateTag != null) _updateBanner(),
+        if (_notice != null) _noticeBanner(),
         Expanded(
           child: _messages.isEmpty
               ? const Center(child: Text('Say hello to start chatting.'))
@@ -989,6 +1237,51 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Banner shown when a newer release than this build is published.
+  Widget _updateBanner() {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.primaryContainer,
+      child: ListTile(
+        dense: true,
+        leading: const Icon(Icons.system_update_alt),
+        title: Text('Eva $_updateTag is available.'),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextButton(
+              onPressed: () => launchUrl(Uri.parse(kReleasesUrl),
+                  mode: LaunchMode.externalApplication),
+              child: const Text('Get it'),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              onPressed: () => setState(() => _updateTag = null),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Dismissible notice for failures that would otherwise be invisible.
+  Widget _noticeBanner() {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.errorContainer,
+      child: ListTile(
+        dense: true,
+        leading: Icon(Icons.info_outline, color: scheme.onErrorContainer),
+        title: Text(_notice!,
+            style: TextStyle(color: scheme.onErrorContainer, fontSize: 13)),
+        trailing: IconButton(
+          icon: const Icon(Icons.close, size: 18),
+          onPressed: () => setState(() => _notice = null),
+        ),
+      ),
+    );
+  }
+
   Widget _pendingImagePreview() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
@@ -1051,11 +1344,9 @@ class _ChatScreenState extends State<ChatScreen> {
             )
           : m.text.isEmpty
               ? const Text('…')
-              : MarkdownBody(
-                  data: m.text,
-                  shrinkWrap: true,
-                  styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
-                      .copyWith(p: Theme.of(context).textTheme.bodyMedium),
+              : GptMarkdown(
+                  m.text,
+                  style: Theme.of(context).textTheme.bodyMedium,
                 ),
     );
 
