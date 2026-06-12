@@ -176,8 +176,12 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await _systemVoice.start(_voiceLocale, onText, onStopped: () {
         if (!mounted) return;
-        setState(() => _listening = false);
-        if (_input.text.trim().isNotEmpty && !_generating) _send();
+        final q = _normalizeCase(_input.text.trim());
+        setState(() {
+          _listening = false;
+          _input.text = q;
+        });
+        if (q.isNotEmpty && !_generating) _send();
       });
       if (mounted) setState(() => _listening = true);
     } catch (e) {
@@ -189,7 +193,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Speaks [text] aloud (assistant replies). Markdown is lightly stripped.
+  /// Speaks [text] aloud (assistant replies), matching the TTS voice to the
+  /// language of the text itself (so e.g. an English reply isn't read with a
+  /// Portuguese voice). Markdown is lightly stripped.
   Future<void> _speak(String text) async {
     final clean = text
         .replaceAll(RegExp(r'[*_`#>]+'), '')
@@ -197,11 +203,93 @@ class _ChatScreenState extends State<ChatScreen> {
         .trim();
     if (clean.isEmpty) return;
     try {
-      if (_voiceLocale.isNotEmpty) {
-        await _tts.setLanguage(_voiceLocale.replaceAll('_', '-'));
+      final tag = _ttsLocaleFor(_detectLangBase(clean)) ??
+          (_voiceLocale.isNotEmpty ? _voiceLocale.replaceAll('_', '-') : null);
+      if (tag != null && (await _tts.isLanguageAvailable(tag)) == true) {
+        await _tts.setLanguage(tag);
       }
       await _tts.speak(clean);
     } catch (_) {/* TTS unavailable — silently skip */}
+  }
+
+  /// One concise instruction (used in assistant mode) telling the model to
+  /// answer in the user's own language rather than drifting to another one.
+  static const String _assistLangDirective =
+      'Always reply in the same language the user used in their most recent '
+      'message. Do not switch to a different language.';
+
+  /// Lower-cases an ALL-CAPS transcript (some recognizers return uppercase) and
+  /// capitalizes sentence starts. Leaves already-mixed-case text untouched so
+  /// recognizers that capitalize names/`I` correctly are not degraded.
+  String _normalizeCase(String s) {
+    final letters = s.replaceAll(RegExp(r'[^A-Za-z]'), '');
+    if (letters.length < 2 || s != s.toUpperCase()) return s;
+    final out = StringBuffer();
+    var capNext = true;
+    for (final ch in s.toLowerCase().runes) {
+      final c = String.fromCharCode(ch);
+      final isLetter = RegExp(r'[a-z]').hasMatch(c);
+      if (capNext && isLetter) {
+        out.write(c.toUpperCase());
+        capNext = false;
+      } else {
+        out.write(c);
+        if (c == '.' || c == '!' || c == '?' || c == '\n') capNext = true;
+      }
+    }
+    // Standalone English "i" → "I".
+    return out
+        .toString()
+        .replaceAllMapped(RegExp(r'\bi\b'), (_) => 'I');
+  }
+
+  /// Best-effort language of [text] (base code like en/pt/fr) by counting common
+  /// words, used only to pick a TTS voice. Returns null when unsure.
+  String? _detectLangBase(String text) {
+    const stop = {
+      'en': ['the', 'and', 'is', 'are', 'you', 'your', 'what', 'how', 'with',
+          'this', 'that', 'have', 'for', 'will', 'can', 'not', 'it'],
+      'pt': ['que', 'não', 'você', 'está', 'com', 'uma', 'para', 'obrigado',
+          'isso', 'tem', 'são', 'mais', 'também', 'sim'],
+      'fr': ['le', 'la', 'les', 'est', 'vous', 'je', 'bonjour', 'merci', 'pas',
+          'avec', 'pour', 'une', 'des', 'oui'],
+      'es': ['que', 'el', 'los', 'está', 'usted', 'gracias', 'con', 'para',
+          'una', 'hola', 'qué', 'pero', 'sí', 'más'],
+      'de': ['der', 'die', 'das', 'und', 'ist', 'ich', 'nicht', 'mit', 'ein',
+          'wie', 'danke', 'ja', 'auch'],
+      'it': ['che', 'non', 'sono', 'con', 'una', 'per', 'grazie', 'come',
+          'questo', 'il', 'sì', 'anche', 'più'],
+    };
+    final words =
+        text.toLowerCase().split(RegExp(r'[^a-zà-ÿ]+')).where((w) => w.isNotEmpty);
+    final counts = <String, int>{};
+    for (final w in words) {
+      stop.forEach((lang, list) {
+        if (list.contains(w)) counts[lang] = (counts[lang] ?? 0) + 1;
+      });
+    }
+    if (counts.isEmpty) return null;
+    final best = counts.entries.reduce((a, b) => a.value >= b.value ? a : b);
+    return best.value >= 2 ? best.key : null;
+  }
+
+  String? _ttsLocaleFor(String? base) {
+    switch (base) {
+      case 'en':
+        return 'en-US';
+      case 'pt':
+        return 'pt-PT';
+      case 'fr':
+        return 'fr-FR';
+      case 'es':
+        return 'es-ES';
+      case 'de':
+        return 'de-DE';
+      case 'it':
+        return 'it-IT';
+      default:
+        return null;
+    }
   }
 
   Future<void> _bootstrap() async {
@@ -375,6 +463,10 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
     assistant.sources = sources;
+
+    // In assistant mode, keep the reply in the user's own language (the model
+    // otherwise sometimes drifts to another language).
+    if (_assistMode) systemContent = '$systemContent\n\n$_assistLangDirective';
 
     // Build the conversation: a system prompt followed by the full history
     // (excluding the still-empty assistant placeholder). A user turn that has
@@ -593,7 +685,13 @@ class _ChatScreenState extends State<ChatScreen> {
       if (_voiceEngine == VoiceEngine.system) {
         // The phone's recognizer (many languages, incl. the system language).
         await _systemVoice.start(_voiceLocale, onText, onStopped: () {
-          if (mounted) setState(() => _listening = false);
+          if (!mounted) return;
+          setState(() {
+            _listening = false;
+            _input.text = _normalizeCase(_input.text);
+            _input.selection =
+                TextSelection.collapsed(offset: _input.text.length);
+          });
         });
       } else {
         // The bundled offline English model — download it on first use.
