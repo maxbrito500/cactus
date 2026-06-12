@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
     <!-- Required to capture voice for on-device speech-to-text. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- Held so the system can bind Eva's voice-interaction services and Eva can
+         be chosen as the default "Digital assistant app". -->
+    <uses-permission android:name="android.permission.BIND_VOICE_INTERACTION"/>
     <application
         android:label="Eva"
         android:name="${applicationName}"
@@ -32,6 +35,38 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- ── Digital assistant (Phase 1) ──────────────────────────────────
+             These three services make Eva selectable as the default assistant.
+             The system binds them (hence android:permission=BIND_VOICE_INTERACTION
+             and exported=true); the session brings up the app in assistant mode. -->
+        <service
+            android:name=".EvaVoiceInteractionService"
+            android:label="Eva"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/interaction_service" />
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+        </service>
+        <service
+            android:name=".EvaVoiceInteractionSessionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true" />
+        <service
+            android:name=".EvaRecognitionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/recognition_service" />
+        </service>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

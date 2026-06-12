@@ -9,7 +9,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:file_picker/file_picker.dart';
 
+import 'package:flutter_tts/flutter_tts.dart';
+
 import 'app_prefs.dart';
+import 'assistant_channel.dart';
 import 'background_indexer.dart';
 import 'document_service.dart';
 import 'inference_isolate.dart';
@@ -104,6 +107,11 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _generating = false;
   // Image queued by the user for the next message (vision models only).
   String? _pendingImagePath;
+  // Digital-assistant mode (invoked via the power button): speaks replies and
+  // auto-listens. _assistPending = a turn is queued until the model is ready.
+  final FlutterTts _tts = FlutterTts();
+  bool _assistMode = false;
+  bool _assistPending = false;
 
   /// Whether the active model can see images (exposes the attach button).
   bool get _visionActive => modelById(_catalog, _activeModelId).isVision;
@@ -111,6 +119,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    _setupAssistant();
     _bootstrap();
   }
 
@@ -120,10 +129,79 @@ class _ChatScreenState extends State<ChatScreen> {
     _scroll.dispose();
     _voice.dispose();
     _systemVoice.dispose();
+    _tts.stop();
     _indexer?.removeListener(_onIndexerProgress);
     _indexer?.dispose();
     _rag?.close();
     super.dispose();
+  }
+
+  // ── Digital assistant (power-button invocation) ────────────────────────────
+
+  /// Wires up assistant mode: handles invocations that arrive while running and
+  /// detects whether this launch itself was an assistant invocation.
+  Future<void> _setupAssistant() async {
+    AssistantChannel.setAssistHandler(() {
+      _assistMode = true;
+      _assistPending = true;
+      _tryStartAssistTurn();
+    });
+    if (await AssistantChannel.consumeAssistLaunch()) {
+      _assistMode = true;
+      _assistPending = true;
+      _tryStartAssistTurn(); // no-op until the model is ready
+    }
+  }
+
+  /// Starts a hands-free assist turn once the model is ready and idle.
+  Future<void> _tryStartAssistTurn() async {
+    if (!_assistPending || _phase != AppPhase.ready) return;
+    if (_generating || _listening) return;
+    _assistPending = false;
+    await _startAssistListening();
+  }
+
+  /// Listens via the phone recognizer (auto-stops on silence), then sends the
+  /// transcript. The reply is spoken because [_assistMode] is set.
+  Future<void> _startAssistListening() async {
+    await _tts.stop();
+    await _voice.stop();
+    await _systemVoice.stop();
+    _input.clear();
+    void onText(String t) {
+      _input.text = t;
+      _input.selection = TextSelection.collapsed(offset: t.length);
+    }
+
+    try {
+      await _systemVoice.start(_voiceLocale, onText, onStopped: () {
+        if (!mounted) return;
+        setState(() => _listening = false);
+        if (_input.text.trim().isNotEmpty && !_generating) _send();
+      });
+      if (mounted) setState(() => _listening = true);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Assistant voice unavailable: $e')),
+        );
+      }
+    }
+  }
+
+  /// Speaks [text] aloud (assistant replies). Markdown is lightly stripped.
+  Future<void> _speak(String text) async {
+    final clean = text
+        .replaceAll(RegExp(r'[*_`#>]+'), '')
+        .replaceAll(RegExp(r'\[(.*?)\]\(.*?\)'), r'$1')
+        .trim();
+    if (clean.isEmpty) return;
+    try {
+      if (_voiceLocale.isNotEmpty) {
+        await _tts.setLanguage(_voiceLocale.replaceAll('_', '-'));
+      }
+      await _tts.speak(clean);
+    } catch (_) {/* TTS unavailable — silently skip */}
   }
 
   Future<void> _bootstrap() async {
@@ -228,6 +306,7 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await _engine.initModel(modelDir);
       setState(() => _phase = AppPhase.ready);
+      _tryStartAssistTurn(); // run any assist turn queued during startup
     } catch (e) {
       setState(() {
         _phase = AppPhase.error;
@@ -242,6 +321,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // Allow sending an image on its own with a sensible default question.
     if (text.isEmpty && imagePath == null) return;
     if (_generating) return;
+    await _tts.stop(); // don't talk over the next turn
     // Sending finalizes any in-progress dictation.
     if (_voice.isListening || _systemVoice.isListening) {
       await _voice.stop();
@@ -335,6 +415,8 @@ class _ChatScreenState extends State<ChatScreen> {
         _generating = false;
         if (tps is num) _lastStats = '${tps.toStringAsFixed(1)} tok/s';
       });
+      // Speak the reply when Eva was invoked as the device assistant.
+      if (_assistMode) _speak(assistant.text);
     } catch (_) {
       setState(() => _generating = false);
     }

@@ -4,6 +4,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import 'app_prefs.dart';
+import 'assistant_channel.dart';
 import 'document_service.dart';
 import 'model_catalog.dart';
 import 'model_manager.dart';
@@ -439,6 +440,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
           const Divider(),
+          _sectionHeader('Assistant'),
+          _assistantTile(),
+          const Divider(),
           _sectionHeader('Documents'),
           if (_documents.isEmpty)
             const Padding(
@@ -586,6 +590,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 fontWeight: FontWeight.bold,
                 color: Theme.of(context).colorScheme.primary)),
       );
+
+  Future<bool>? _assistantStatus;
+
+  Widget _assistantTile() {
+    _assistantStatus ??= AssistantChannel.isAssistant();
+    return FutureBuilder<bool>(
+      future: _assistantStatus,
+      builder: (context, snap) {
+        final isAssistant = snap.data ?? false;
+        return ListTile(
+          leading: const Icon(Icons.assistant_outlined),
+          title: const Text('Use Eva as your phone assistant'),
+          subtitle: Text(isAssistant
+              ? 'Eva is your default assistant — press and hold the power '
+                  'button to talk to it.'
+              : 'Make Eva the default digital assistant, then press and hold '
+                  'the power button to talk to it.'),
+          trailing: isAssistant
+              ? const Icon(Icons.check_circle, color: Colors.green)
+              : const Text('Set up'),
+          onTap: () async {
+            await AssistantChannel.requestAssistantRole();
+            if (mounted) {
+              setState(() => _assistantStatus = AssistantChannel.isAssistant());
+            }
+          },
+        );
+      },
+    );
+  }
 
   Widget _modelTile(ModelSpec m, bool busy) {
     final isActive = m.id == widget.activeId;
